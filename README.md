@@ -1,6 +1,6 @@
 # UniBud
 
-University learning workspace. This checkpoint is a backend domain library, security gates, and tests. It is not an HTTP service and not a finished product.
+University learning workspace. The runnable service in this branch is the loopback HTTP API (`npm run serve`). Screen files under `src/components` and `src/app/**/page.tsx` are an unfinished scaffold for the frontend owner. See `docs/FRONTEND-HANDOFF.md` and `docs/API-CONTRACT.md`.
 
 Founder visual approval for the glass direction and owl rasters is recorded in `docs/TRACEABILITY.md`. Screen implementation continues after this review checkpoint. `docs/design/approved-glass-v2.jpg` and `public/brand/` are the supplied reference assets only. The concept image is not the application and is not a screenshot.
 
@@ -18,9 +18,10 @@ Founder visual approval for the glass direction and owl rasters is recorded in `
 npm install
 npm test
 npm run typecheck
+npm run serve
 ```
 
-There is no application server in this checkpoint. Do not treat the domain functions as a running website.
+`npm run serve` listens on `127.0.0.1` and `PORT` (default 3000) and serves `/api/*` only. `npm run typecheck` does not include the unfinished screen files. Do not point a public host at this process.
 
 ## Environment variable names
 

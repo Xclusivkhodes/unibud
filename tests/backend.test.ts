@@ -293,7 +293,7 @@ test("connected learning records stay owned and fixture metrics stay separate", 
   expect(twin(database, learner.id, topic.id).evidence).toEqual({ correct: 0, total: 2 });
   const fixtureCourse = createCourse(database, fixture.id, { name: "Fixture" }) as { id: string };
   const fixtureTopic = createTopic(database, fixture.id, fixtureCourse.id, "Hidden") as { id: string };
-  const fixtureQuestion = addQuestion(database, fixture.id, { courseId: fixtureCourse.id, topicId: fixtureTopic.id, prompt: "x", choices: ["a"], correctIndex: 0, label: "test_fixture" });
+  const fixtureQuestion = addQuestion(database, fixture.id, { courseId: fixtureCourse.id, topicId: fixtureTopic.id, prompt: "x", choices: ["a", "b"], correctIndex: 0, label: "test_fixture" });
   const fixtureAttempt = startAttempt(database, fixture.id, { courseId: fixtureCourse.id, topicId: fixtureTopic.id, kind: "practice", timingMode: "untimed", clientToken: "fix-1" });
   answerAttempt(database, fixture.id, fixtureAttempt.id, fixtureQuestion, 0);
   submitAttempt(database, fixture.id, fixtureAttempt.id);
@@ -303,10 +303,11 @@ test("connected learning records stay owned and fixture metrics stay separate", 
   const tutor = askTutor(database, learner.id, chat, "Explain pH", baseRoute());
   expect(tutor.fabricatedAnswer).toBe(false);
   expect(tutor.assistantMessages).toBe(0);
-  const proposal = proposeCram(database, learner.id, { courseId: course.id, title: "Final", examDate: "2026-12-01", availableHours: 0.5, syllabus: "acids" });
+  const proposal = proposeCram(database, learner.id, { courseId: course.id, title: "Final", examDate: "2026-12-01", availableHours: 0.5, syllabus: "acids", now: "2026-11-09T12:00:00.000Z" });
   expect(proposal.predictsFutureQuestions).toBe(false);
-  expect(proposal.insufficientTime).toBe(true);
-  expect(confirmCram(database, learner.id, proposal).taskIds.length).toBeGreaterThan(0);
+  expect(proposal.insufficientTime).toBe(false);
+  expect(proposal.priorities[0]?.dueAt).toMatch(/^2026-11-09T/);
+  expect(confirmCram(database, learner.id, proposal).taskIds.length).toBe(1);
   const ph = strongAcidPh(0.01);
   expect(ph.result).toEqual({ pH: 2 });
   const range = projectile(10, 45);

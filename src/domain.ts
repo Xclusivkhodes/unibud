@@ -1,4 +1,4 @@
-import { AppError, hashPassword, localDate, newId, newSessionToken, nowIso, recordedMinutes, sha256, studyStreak, verifyPassword } from "./security/crypto.js";
+import { AppError, hashPassword, localDate, newId, newSessionToken, nowIso, recordedMinutes, sha256, shiftDate, studyStreak, verifyPassword } from "./security/crypto.js";
 import { all, get, run, transaction, type Db } from "./db.js";
 import { planRoute, type RouteInput } from "./providers/registry.js";
 import { reviewSm2, SCHEDULER_ID } from "./learning/scheduler.js";
@@ -209,6 +209,16 @@ export function reviewCard(db: Db, userId: string, cardId: string, quality: numb
 }
 
 export function addQuestion(db: Db, userId: string, input: { courseId: string; topicId?: string; sourceId?: string; prompt: string; choices: string[]; correctIndex: number; explanation?: string; label: string }) {
+  must(get(db, "SELECT id FROM courses WHERE id = ? AND user_id = ?", input.courseId, userId));
+  if (input.topicId) {
+    must(get(db, "SELECT id FROM topics WHERE id = ? AND user_id = ? AND course_id = ?", input.topicId, userId, input.courseId));
+  }
+  if (!Array.isArray(input.choices) || input.choices.length < 2 || input.choices.some((choice) => choice.trim() === "")) {
+    throw new AppError("invalid_choices", "A question needs at least two non-empty choices.");
+  }
+  if (!Number.isInteger(input.correctIndex) || input.correctIndex < 0 || input.correctIndex >= input.choices.length) {
+    throw new AppError("invalid_answer_key", "The answer key is outside the stored choices.");
+  }
   const id = newId();
   run(
     db,
@@ -248,10 +258,17 @@ export function startAttempt(db: Db, userId: string, input: { courseId?: string;
 }
 
 export function answerAttempt(db: Db, userId: string, attemptId: string, questionId: string, selectedIndex: number) {
-  const attempt = must(get<{ status: string }>(db, "SELECT status FROM attempts WHERE id = ? AND user_id = ?", attemptId, userId));
+  const attempt = must(get<{ status: string; course_id: string | null; topic_id: string | null }>(db, "SELECT status, course_id, topic_id FROM attempts WHERE id = ? AND user_id = ?", attemptId, userId));
   if (attempt.status !== "in_progress") throw new AppError("attempt_closed", "Attempt is not open.");
-  const question = must(get<{ correct_index: number; user_id: string }>(db, "SELECT correct_index, user_id FROM questions WHERE id = ?", questionId));
-  if (question.user_id !== userId) throw new AppError("not_found", "Not found", 404);
+  if (!attempt.course_id && !attempt.topic_id) throw new AppError("attempt_unscoped", "Attempt has no course or topic scope.");
+  const question = get<{ correct_index: number; course_id: string; topic_id: string | null; choices_json: string }>(db, "SELECT correct_index, course_id, topic_id, choices_json FROM questions WHERE id = ? AND user_id = ?", questionId, userId);
+  if (!question) throw new AppError("not_found", "Not found", 404);
+  const choices = JSON.parse(question.choices_json) as unknown[];
+  if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= choices.length) {
+    throw new AppError("invalid_selection", "Answer is outside the stored choices.");
+  }
+  if (attempt.course_id && question.course_id !== attempt.course_id) throw new AppError("question_out_of_scope", "Question is outside this attempt.");
+  if (attempt.topic_id && question.topic_id !== attempt.topic_id) throw new AppError("question_out_of_scope", "Question is outside this attempt.");
   const correct = selectedIndex === question.correct_index ? 1 : 0;
   run(db, "DELETE FROM attempt_answers WHERE attempt_id = ? AND question_id = ? AND user_id = ?", attemptId, questionId, userId);
   run(db, "INSERT INTO attempt_answers (id, attempt_id, question_id, user_id, selected_index, correct, feedback) VALUES (?, ?, ?, ?, ?, ?, ?)", newId(), attemptId, questionId, userId, selectedIndex, correct, correct ? "matched the stored key" : "did not match the stored key");
@@ -278,28 +295,32 @@ export function interruptAttempt(db: Db, userId: string, attemptId: string) {
 }
 
 export function refreshMisconceptions(db: Db, userId: string): void {
-  const wrong = all<{ question_id: string; attempt_id: string; topic_id: string | null }>(
+  const wrong = all<{ question_id: string; attempt_id: string; topic_id: string | null; submitted_at: string }>(
     db,
-    `SELECT aa.question_id, aa.attempt_id, a.topic_id FROM attempt_answers aa
+    `SELECT aa.question_id, aa.attempt_id, q.topic_id, a.submitted_at FROM attempt_answers aa
      JOIN attempts a ON a.id = aa.attempt_id
+     JOIN questions q ON q.id = aa.question_id AND q.user_id = aa.user_id
      WHERE aa.user_id = ? AND aa.correct = 0 AND a.status = 'submitted'`,
     userId,
   );
-  const groups = new Map<string, { attempts: string[]; topicId: string | null }>();
+  const groups = new Map<string, { attempts: Array<{ id: string; submittedAt: string }>; topicId: string | null }>();
   for (const row of wrong) {
     const group = groups.get(row.question_id) ?? { attempts: [], topicId: row.topic_id };
-    group.attempts.push(row.attempt_id);
+    if (!group.attempts.some((item) => item.id === row.attempt_id)) group.attempts.push({ id: row.attempt_id, submittedAt: row.submitted_at });
     groups.set(row.question_id, group);
   }
   for (const [questionId, group] of groups) {
-    if (group.attempts.length < 2) continue;
-    const existing = get<{ id: string; status: string }>(db, "SELECT id, status FROM misconception_records WHERE user_id = ? AND question_id = ?", userId, questionId);
-    if (existing?.status === "corrected") continue;
-    const evidence = JSON.stringify({ questionId, attemptIds: group.attempts, hypothesis: true, diagnosis: false });
+    const existing = get<{ id: string; status: string; evidence_json: string }>(db, "SELECT id, status, evidence_json FROM misconception_records WHERE user_id = ? AND question_id = ?", userId, questionId);
+    const prior = existing ? (JSON.parse(existing.evidence_json) as { closedAttemptIds?: string[] }) : {};
+    const closed = new Set(prior.closedAttemptIds ?? []);
+    const episode = group.attempts.filter((item) => !closed.has(item.id));
+    if (episode.length < 2) continue;
+    const evidence = JSON.stringify({ questionId, attemptIds: episode.map((item) => item.id), closedAttemptIds: [...closed], hypothesis: true, diagnosis: false });
+    const at = nowIso();
     if (existing) {
-      run(db, "UPDATE misconception_records SET evidence_json = ?, updated_at = ?, status = 'hypothesis' WHERE id = ?", evidence, nowIso(), existing.id);
+      run(db, "UPDATE misconception_records SET evidence_json = ?, updated_at = ?, status = 'hypothesis', topic_id = ? WHERE id = ?", evidence, at, group.topicId, existing.id);
     } else {
-      run(db, "INSERT INTO misconception_records (id, user_id, topic_id, question_id, status, evidence_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'hypothesis', ?, ?, ?)", newId(), userId, group.topicId, questionId, evidence, nowIso(), nowIso());
+      run(db, "INSERT INTO misconception_records (id, user_id, topic_id, question_id, status, evidence_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'hypothesis', ?, ?, ?)", newId(), userId, group.topicId, questionId, evidence, at, at);
     }
   }
 }
@@ -316,13 +337,26 @@ export function listMisconceptions(db: Db, userId: string) {
 }
 
 export function correctMisconception(db: Db, userId: string, id: string) {
-  const result = run(db, "UPDATE misconception_records SET status = 'corrected', updated_at = ? WHERE id = ? AND user_id = ?", nowIso(), id, userId);
+  const row = must(get<{ evidence_json: string }>(db, "SELECT evidence_json FROM misconception_records WHERE id = ? AND user_id = ?", id, userId));
+  const parsed = JSON.parse(row.evidence_json) as { attemptIds?: string[]; closedAttemptIds?: string[] };
+  const closedAttemptIds = [...new Set([...(parsed.closedAttemptIds ?? []), ...(parsed.attemptIds ?? [])])];
+  const evidence = JSON.stringify({ ...parsed, attemptIds: [], closedAttemptIds, hypothesis: false, diagnosis: false });
+  const result = run(db, "UPDATE misconception_records SET status = 'corrected', evidence_json = ?, updated_at = ? WHERE id = ? AND user_id = ?", evidence, nowIso(), id, userId);
   if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
 }
 
 export function twin(db: Db, userId: string, topicId: string) {
   const topic = must(get<{ self_reported_level: string }>(db, "SELECT self_reported_level FROM topics WHERE id = ? AND user_id = ?", topicId, userId));
-  const scores = get<{ correct: number; total: number }>(db, "SELECT COALESCE(SUM(score_correct), 0) AS correct, COALESCE(SUM(score_total), 0) AS total FROM attempts WHERE user_id = ? AND topic_id = ? AND status = 'submitted'", userId, topicId);
+  const scores = get<{ correct: number; total: number }>(
+    db,
+    `SELECT COALESCE(SUM(aa.correct), 0) AS correct, COUNT(*) AS total
+     FROM attempt_answers aa
+     JOIN questions q ON q.id = aa.question_id AND q.user_id = aa.user_id
+     JOIN attempts a ON a.id = aa.attempt_id AND a.user_id = aa.user_id
+     WHERE aa.user_id = ? AND q.topic_id = ? AND a.status = 'submitted'`,
+    userId,
+    topicId,
+  );
   const games = get<{ n: number }>(db, "SELECT COUNT(*) AS n FROM game_results WHERE user_id = ?", userId);
   return {
     selfReportedLevel: topic.self_reported_level,
@@ -396,20 +430,55 @@ export function productAttemptCount(db: Db): number {
   return Number(get<{ n: number }>(db, "SELECT COUNT(*) AS n FROM attempts a JOIN users u ON u.id = a.user_id WHERE u.data_class = 'learner' AND a.status = 'submitted'")?.n ?? 0);
 }
 
-export function proposeCram(db: Db, userId: string, input: { courseId: string; title: string; examDate: string; availableHours: number; syllabus: string }) {
+function topicEvidence(db: Db, userId: string, topicId: string): { correct: number; total: number } {
+  const scores = get<{ correct: number; total: number }>(
+    db,
+    `SELECT COALESCE(SUM(aa.correct), 0) AS correct, COUNT(*) AS total
+     FROM attempt_answers aa
+     JOIN questions q ON q.id = aa.question_id AND q.user_id = aa.user_id
+     JOIN attempts a ON a.id = aa.attempt_id AND a.user_id = aa.user_id
+     WHERE aa.user_id = ? AND q.topic_id = ? AND a.status = 'submitted'`,
+    userId,
+    topicId,
+  );
+  return { correct: Number(scores?.correct ?? 0), total: Number(scores?.total ?? 0) };
+}
+
+export function proposeCram(db: Db, userId: string, input: { courseId: string; title: string; examDate: string; availableHours: number; syllabus: string; now?: string }) {
   const topics = all<{ id: string; name: string }>(db, "SELECT id, name FROM topics WHERE user_id = ? AND course_id = ?", userId, input.courseId);
   const priorities = topics.map((topic) => {
-    const scores = get<{ correct: number; total: number }>(db, "SELECT COALESCE(SUM(score_correct), 0) AS correct, COALESCE(SUM(score_total), 0) AS total FROM attempts WHERE user_id = ? AND topic_id = ? AND status = 'submitted'", userId, topic.id);
-    const total = scores?.total ?? 0;
-    const accuracy = total === 0 ? null : (scores?.correct ?? 0) / total;
-    return { topicId: topic.id, name: topic.name, accuracy, reason: total === 0 ? "no attempts yet" : "lower recorded accuracy is listed first" };
+    const scores = topicEvidence(db, userId, topic.id);
+    const total = scores.total;
+    const accuracy = total === 0 ? null : scores.correct / total;
+    return { topicId: topic.id, name: topic.name, accuracy, reason: total === 0 ? "no question attempts for this topic yet" : "share of the time budget follows recorded misses" };
   });
   priorities.sort((a, b) => (a.accuracy ?? -1) - (b.accuracy ?? -1));
-  const suggestedHours = priorities.length;
+  const now = input.now ?? nowIso();
+  const today = now.slice(0, 10);
+  const examDay = input.examDate.slice(0, 10);
+  const span = Math.round((Date.parse(`${examDay}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+  const totalMinutes = Math.max(0, Math.round(input.availableHours * 60));
+  const neededMinutes = priorities.length * 30;
+  const insufficientTime = span < 0 || totalMinutes < neededMinutes;
+  const dayCount = span < 0 ? 0 : span + 1;
+  const weights = priorities.map((item) => (item.accuracy === null ? 2 : 1 + (1 - item.accuracy)));
+  const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
+  const scheduled = priorities.map((item, index) => {
+    const minutes = weightSum === 0 || totalMinutes === 0 ? 0 : Math.floor((totalMinutes * weights[index]) / weightSum);
+    const dueAt = dayCount === 0 || minutes === 0 ? null : `${shiftDate(today, index % dayCount)}T09:00:00.000Z`;
+    return { ...item, minutes, dueAt };
+  });
+  let remainder = totalMinutes - scheduled.reduce((sum, item) => sum + item.minutes, 0);
+  for (let index = 0; index < scheduled.length && remainder > 0; index += 1) {
+    scheduled[index].minutes += 1;
+    remainder -= 1;
+    if (!scheduled[index].dueAt && dayCount > 0) scheduled[index].dueAt = `${shiftDate(today, index % dayCount)}T09:00:00.000Z`;
+  }
   return {
-    priorities,
-    suggestedHours,
-    insufficientTime: suggestedHours > input.availableHours,
+    priorities: scheduled,
+    suggestedMinutes: totalMinutes,
+    neededMinutes,
+    insufficientTime,
     predictsFutureQuestions: false,
     examDate: input.examDate,
     syllabus: input.syllabus,
@@ -422,26 +491,45 @@ export function proposeCram(db: Db, userId: string, input: { courseId: string; t
 export function confirmCram(db: Db, userId: string, proposal: ReturnType<typeof proposeCram>) {
   const examId = newId();
   run(db, "INSERT INTO exams (id, user_id, course_id, title, exam_date, available_hours, syllabus_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", examId, userId, proposal.courseId, proposal.title, proposal.examDate, proposal.availableHours, proposal.syllabus, nowIso());
-  const taskIds = proposal.priorities.map((item) => (createTask(db, userId, { title: `Revise ${item.name}`, courseId: proposal.courseId, topicId: item.topicId, origin: "suggestion", confirmed: true, reason: item.reason }) as { id: string }).id);
+  const taskIds = proposal.priorities
+    .filter((item) => item.minutes > 0 && item.dueAt)
+    .map((item) => (createTask(db, userId, { title: `Revise ${item.name}`, courseId: proposal.courseId, topicId: item.topicId, dueAt: item.dueAt ?? undefined, origin: "suggestion", confirmed: true, reason: `${item.reason}. ${item.minutes} minutes from the stated budget.` }) as { id: string }).id);
   return { examId, taskIds, insufficientTime: proposal.insufficientTime };
 }
 
-export function proposeAutopilot(db: Db, userId: string, courseId: string) {
-  const open = all<{ id: string; title: string; due_at: string | null }>(db, "SELECT id, title, due_at FROM tasks WHERE user_id = ? AND course_id = ? AND status = 'open'", userId, courseId);
-  const due = open.map((task) => task.due_at).filter(Boolean);
-  const conflicts = due.filter((value, index) => due.indexOf(value) !== index);
-  return {
-    before: open,
-    after: open.map((task) => task.title),
-    conflicts,
-    applied: false,
-  };
+export function proposeAutopilot(db: Db, userId: string, courseId: string, now = nowIso()) {
+  const open = all<{ id: string; title: string; due_at: string | null; rev: number }>(db, "SELECT id, title, due_at, rev FROM tasks WHERE user_id = ? AND course_id = ? AND status = 'open'", userId, courseId);
+  const exam = get<{ exam_date: string }>(db, "SELECT exam_date FROM exams WHERE user_id = ? AND course_id = ? ORDER BY exam_date LIMIT 1", userId, courseId);
+  const anchor = exam?.exam_date.slice(0, 10) ?? shiftDate(now.slice(0, 10), 1);
+  const seen = new Set<string>();
+  const conflicts: string[] = [];
+  const after = open.map((task) => {
+    let day = task.due_at ? task.due_at.slice(0, 10) : anchor;
+    if (seen.has(day)) conflicts.push(task.due_at ?? "undated");
+    while (seen.has(day)) day = shiftDate(day, 1);
+    seen.add(day);
+    const dueAt = `${day}T09:00:00.000Z`;
+    return { id: task.id, title: task.title, dueAt, rev: task.rev, changed: task.due_at?.slice(0, 10) !== day };
+  });
+  return { before: open, after, conflicts, applied: false, courseId };
 }
 
 export function confirmAutopilot(db: Db, userId: string, proposal: ReturnType<typeof proposeAutopilot>) {
+  const mismatches: string[] = [];
+  for (const row of proposal.after) {
+    const current = get<{ rev: number; user_id: string }>(db, "SELECT rev, user_id FROM tasks WHERE id = ? AND user_id = ?", row.id, userId);
+    if (!current || current.rev !== row.rev) mismatches.push(row.id);
+  }
+  if (mismatches.length > 0) return { id: null, status: "conflict" as const, applied: false, mismatches };
+  let updated = 0;
+  for (const row of proposal.after) {
+    if (!row.changed) continue;
+    const result = run(db, "UPDATE tasks SET due_at = ?, rev = rev + 1 WHERE id = ? AND user_id = ? AND rev = ?", row.dueAt, row.id, userId, row.rev);
+    updated += result.changes;
+  }
   const id = newId();
   run(db, "INSERT INTO autopilot_proposals (id, user_id, diff_json, conflicts_json, status, created_at) VALUES (?, ?, ?, ?, 'confirmed', ?)", id, userId, JSON.stringify({ before: proposal.before, after: proposal.after }), JSON.stringify(proposal.conflicts), nowIso());
-  return { id, status: "confirmed" as const };
+  return { id, status: "confirmed" as const, applied: true, mismatches, updated };
 }
 
 export function createCircle(db: Db, ownerId: string, name: string) {

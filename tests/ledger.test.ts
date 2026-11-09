@@ -7,8 +7,7 @@ test("offline ledger keeps browser sync outstanding and does not depend on ts-fs
   const names = [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})];
   expect(names).not.toContain("ts-fsrs");
   expect(names).not.toContain("katex");
-  expect(names).not.toContain("next");
-  expect(names).not.toContain("react");
+  expect(names).toContain("next");
   expect(OFFLINE_LEDGER.find((row) => row.id === "browser-reload-offline")?.impl).toBe("not_implemented");
   expect(OFFLINE_LEDGER.find((row) => row.id === "sync-ack-required")?.impl).toBe("tested");
   expect(process.version.startsWith("v22.")).toBe(true);
