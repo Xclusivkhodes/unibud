@@ -1,0 +1,643 @@
+import { AppError, hashPassword, localDate, newId, newSessionToken, nowIso, recordedMinutes, sha256, studyStreak, verifyPassword } from "./security/crypto.js";
+import { all, get, run, transaction, type Db } from "./db.js";
+import { planRoute, type RouteInput } from "./providers/registry.js";
+import { reviewSm2, SCHEDULER_ID } from "./learning/scheduler.js";
+import { cacheFresh } from "./youtube/api.js";
+
+type Row = Record<string, unknown>;
+
+function must<T>(row: T): NonNullable<T> {
+  if (row === undefined || row === null) throw new AppError("not_found", "Not found", 404);
+  return row as NonNullable<T>;
+}
+
+function activity(db: Db, userId: string, type: string, payload: unknown, at = nowIso()): string {
+  const id = newId();
+  run(db, "INSERT INTO activity_events (id, user_id, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)", id, userId, type, JSON.stringify(payload), at);
+  return id;
+}
+
+function notify(db: Db, userId: string, kind: string, title: string, body: string, sourceEventId: string, at = nowIso()): void {
+  run(
+    db,
+    "INSERT OR IGNORE INTO notifications (id, user_id, kind, title, body, source_event_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    newId(),
+    userId,
+    kind,
+    title,
+    body,
+    sourceEventId,
+    at,
+  );
+}
+
+export function registerUser(db: Db, input: { email: string; password: string; dataClass?: "learner" | "test_fixture" }): { id: string; email: string } {
+  const email = input.email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new AppError("invalid_email", "Email was rejected.");
+  if (input.password.length < 10) throw new AppError("weak_password", "Password was rejected.");
+  if (get(db, "SELECT id FROM users WHERE email = ?", email)) throw new AppError("email_taken", "Email is already registered.");
+  const id = newId();
+  const at = nowIso();
+  transaction(db, () => {
+    run(db, "INSERT INTO users (id, email, password_hash, data_class, created_at) VALUES (?, ?, ?, ?, ?)", id, email, hashPassword(input.password), input.dataClass ?? "learner", at);
+    run(db, "INSERT INTO profiles (user_id, updated_at) VALUES (?, ?)", id, at);
+    run(db, "INSERT INTO ai_settings (user_id, updated_at) VALUES (?, ?)", id, at);
+  });
+  return { id, email };
+}
+
+export function login(db: Db, email: string, password: string, at = nowIso()): { token: string; userId: string } {
+  const user = get<{ id: string; password_hash: string }>(db, "SELECT id, password_hash FROM users WHERE email = ?", email.trim().toLowerCase());
+  if (!user || !verifyPassword(password, user.password_hash)) throw new AppError("invalid_login", "Login was rejected.", 401);
+  const token = newSessionToken();
+  const expires = new Date(new Date(at).getTime() + 14 * 24 * 60 * 60 * 1000).toISOString();
+  run(db, "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)", sha256(token), user.id, at, expires);
+  return { token, userId: user.id };
+}
+
+export function userFromSession(db: Db, token: string, at = nowIso()): { id: string; email: string; data_class: string } | null {
+  const row = get<{ id: string; email: string; data_class: string; expires_at: string }>(
+    db,
+    `SELECT u.id, u.email, u.data_class, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?`,
+    sha256(token),
+  );
+  if (!row || row.expires_at <= at) return null;
+  return { id: row.id, email: row.email, data_class: row.data_class };
+}
+
+export function logout(db: Db, token: string): void {
+  run(db, "DELETE FROM sessions WHERE token_hash = ?", sha256(token));
+}
+
+export function saveProfile(db: Db, userId: string, patch: Record<string, string | number | null>, rev: number) {
+  const allowed = ["legal_name", "display_name", "education_level", "institution", "explanation_depth", "formats_json", "accessibility_json", "language", "offline_consent", "available_hours_per_week", "self_reported_confidence", "goals_text", "exam_syllabus_text", "timezone", "onboarding_status"] as const;
+  const keys = Object.keys(patch).filter((key) => (allowed as readonly string[]).includes(key));
+  if (keys.length === 0) throw new AppError("empty_patch", "Nothing to update.");
+  const assignments = keys.map((key) => `${key} = ?`).join(", ");
+  const result = run(db, `UPDATE profiles SET ${assignments}, updated_at = ?, rev = rev + 1 WHERE user_id = ? AND rev = ?`, ...keys.map((key) => patch[key]), nowIso(), userId, rev);
+  if (result.changes !== 1) return { status: "conflict" as const, server: must(get(db, "SELECT * FROM profiles WHERE user_id = ?", userId)) };
+  return { status: "acked" as const, rev: rev + 1 };
+}
+
+export function createCourse(db: Db, userId: string, input: { name: string; subjectName?: string; goal?: string }) {
+  const id = newId();
+  const at = nowIso();
+  run(db, "INSERT INTO courses (id, user_id, name, subject_name, goal_text, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, userId, input.name.trim(), input.subjectName ?? "", input.goal ?? "", at);
+  activity(db, userId, "course_created", { courseId: id }, at);
+  return must(get(db, "SELECT * FROM courses WHERE id = ? AND user_id = ?", id, userId));
+}
+
+export function createTopic(db: Db, userId: string, courseId: string, name: string, selfReportedLevel = "") {
+  must(get(db, "SELECT id FROM courses WHERE id = ? AND user_id = ?", courseId, userId));
+  const id = newId();
+  run(db, "INSERT INTO topics (id, course_id, user_id, name, self_reported_level, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, courseId, userId, name.trim(), selfReportedLevel, nowIso());
+  return must(get(db, "SELECT * FROM topics WHERE id = ? AND user_id = ?", id, userId));
+}
+
+export function addSource(db: Db, userId: string, input: { courseId: string; topicId?: string; title: string; body: string; kind?: string }) {
+  must(get(db, "SELECT id FROM courses WHERE id = ? AND user_id = ?", input.courseId, userId));
+  const id = newId();
+  const at = nowIso();
+  run(
+    db,
+    "INSERT INTO sources (id, user_id, course_id, topic_id, kind, title, body, provenance_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    id,
+    userId,
+    input.courseId,
+    input.topicId ?? null,
+    input.kind ?? "note",
+    input.title,
+    input.body,
+    JSON.stringify({ origin: "learner", untrusted: true }),
+    at,
+  );
+  activity(db, userId, "source_added", { sourceId: id, courseId: input.courseId }, at);
+  return must(get<Row>(db, "SELECT * FROM sources WHERE id = ? AND user_id = ?", id, userId));
+}
+
+export function saveArtifact(db: Db, userId: string, input: { courseId: string; topicId?: string; sourceId?: string; kind: string; title: string; body: string; label: string; depth?: string; status?: string }) {
+  if (input.sourceId) must(get(db, "SELECT id FROM sources WHERE id = ? AND user_id = ?", input.sourceId, userId));
+  const id = newId();
+  const at = nowIso();
+  run(
+    db,
+    `INSERT INTO artifacts (id, user_id, course_id, topic_id, source_id, kind, title, body, label, depth, status, provenance_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    id,
+    userId,
+    input.courseId,
+    input.topicId ?? null,
+    input.sourceId ?? null,
+    input.kind,
+    input.title,
+    input.body,
+    input.label,
+    input.depth ?? null,
+    input.status ?? "saved",
+    JSON.stringify({ sourceId: input.sourceId ?? null, label: input.label }),
+    at,
+    at,
+  );
+  return must(get<Row>(db, "SELECT * FROM artifacts WHERE id = ? AND user_id = ?", id, userId));
+}
+
+export function composeOutline(sourceBody: string, sourceId: string): Array<{ sourceId: string; text: string; label: "sourced" }> {
+  return sourceBody
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 200)
+    .map((text) => ({ sourceId, text, label: "sourced" as const }));
+}
+
+export function composePack(db: Db, userId: string, sourceIds: string[], courseId: string, topicId?: string) {
+  const blocks = sourceIds.map((sourceId) => {
+    const source = must(get<{ id: string; title: string; body: string }>(db, "SELECT id, title, body FROM sources WHERE id = ? AND user_id = ?", sourceId, userId));
+    return { sourceId: source.id, title: source.title, text: source.body, label: "sourced" as const };
+  });
+  const body = blocks.map((block) => `[${block.sourceId}] ${block.text}`).join("\n\n");
+  return saveArtifact(db, userId, { courseId, topicId, sourceId: sourceIds[0], kind: "study_pack", title: "Study pack", body, label: "sourced" });
+}
+
+export function createDeck(db: Db, userId: string, input: { title: string; courseId?: string; topicId?: string; sourceId?: string }) {
+  const id = newId();
+  run(db, "INSERT INTO decks (id, user_id, course_id, topic_id, source_id, title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, input.courseId ?? null, input.topicId ?? null, input.sourceId ?? null, input.title, nowIso());
+  return must(get<Row>(db, "SELECT * FROM decks WHERE id = ? AND user_id = ?", id, userId));
+}
+
+export function addCard(db: Db, userId: string, input: { deckId: string; front: string; back: string; sourceId?: string; label: string }) {
+  must(get(db, "SELECT id FROM decks WHERE id = ? AND user_id = ?", input.deckId, userId));
+  const id = newId();
+  const at = nowIso();
+  run(
+    db,
+    "INSERT INTO cards (id, deck_id, user_id, source_id, front, back, label, due_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    id,
+    input.deckId,
+    userId,
+    input.sourceId ?? null,
+    input.front,
+    input.back,
+    input.label,
+    at,
+    at,
+  );
+  return must(get<Row>(db, "SELECT * FROM cards WHERE id = ? AND user_id = ?", id, userId));
+}
+
+export function reviewCard(db: Db, userId: string, cardId: string, quality: number, revealed: boolean, scoringMethod: "self_rated" | "objective", at = nowIso()) {
+  const card = must(get<{ ease: number; interval_days: number; repetitions: number }>(db, "SELECT ease, interval_days, repetitions FROM cards WHERE id = ? AND user_id = ?", cardId, userId));
+  const next = reviewSm2({ ease: card.ease, intervalDays: card.interval_days, repetitions: card.repetitions, dueAt: null }, quality, at, revealed);
+  transaction(db, () => {
+    run(db, "UPDATE cards SET ease = ?, interval_days = ?, repetitions = ?, due_at = ?, rev = rev + 1 WHERE id = ? AND user_id = ?", next.ease, next.intervalDays, next.repetitions, next.dueAt, cardId, userId);
+    run(
+      db,
+      "INSERT INTO card_reviews (id, card_id, user_id, quality, scoring_method, revealed, reviewed_at, interval_days, ease, scheduler) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      newId(),
+      cardId,
+      userId,
+      quality,
+      scoringMethod,
+      revealed ? 1 : 0,
+      at,
+      next.intervalDays,
+      next.ease,
+      SCHEDULER_ID,
+    );
+  });
+  return { ...next, scheduler: SCHEDULER_ID, scoringMethod, mastery: null };
+}
+
+export function addQuestion(db: Db, userId: string, input: { courseId: string; topicId?: string; sourceId?: string; prompt: string; choices: string[]; correctIndex: number; explanation?: string; label: string }) {
+  const id = newId();
+  run(
+    db,
+    "INSERT INTO questions (id, user_id, course_id, topic_id, source_id, prompt, choices_json, correct_index, explanation, label, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    id,
+    userId,
+    input.courseId,
+    input.topicId ?? null,
+    input.sourceId ?? null,
+    input.prompt,
+    JSON.stringify(input.choices),
+    input.correctIndex,
+    input.explanation ?? "",
+    input.label,
+    nowIso(),
+  );
+  return id;
+}
+
+export function startAttempt(db: Db, userId: string, input: { courseId?: string; topicId?: string; kind: string; timingMode: string; clientToken: string }) {
+  const existing = get<{ id: string }>(db, "SELECT id FROM attempts WHERE user_id = ? AND client_token = ?", userId, input.clientToken);
+  if (existing) return { id: existing.id, duplicate: true };
+  const id = newId();
+  run(
+    db,
+    "INSERT INTO attempts (id, user_id, course_id, topic_id, kind, timing_mode, started_at, status, scoring_method, client_token) VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress', 'objective_key', ?)",
+    id,
+    userId,
+    input.courseId ?? null,
+    input.topicId ?? null,
+    input.kind,
+    input.timingMode,
+    nowIso(),
+    input.clientToken,
+  );
+  return { id, duplicate: false };
+}
+
+export function answerAttempt(db: Db, userId: string, attemptId: string, questionId: string, selectedIndex: number) {
+  const attempt = must(get<{ status: string }>(db, "SELECT status FROM attempts WHERE id = ? AND user_id = ?", attemptId, userId));
+  if (attempt.status !== "in_progress") throw new AppError("attempt_closed", "Attempt is not open.");
+  const question = must(get<{ correct_index: number; user_id: string }>(db, "SELECT correct_index, user_id FROM questions WHERE id = ?", questionId));
+  if (question.user_id !== userId) throw new AppError("not_found", "Not found", 404);
+  const correct = selectedIndex === question.correct_index ? 1 : 0;
+  run(db, "DELETE FROM attempt_answers WHERE attempt_id = ? AND question_id = ? AND user_id = ?", attemptId, questionId, userId);
+  run(db, "INSERT INTO attempt_answers (id, attempt_id, question_id, user_id, selected_index, correct, feedback) VALUES (?, ?, ?, ?, ?, ?, ?)", newId(), attemptId, questionId, userId, selectedIndex, correct, correct ? "matched the stored key" : "did not match the stored key");
+  return { correct: Boolean(correct), scoringMethod: "objective_key" };
+}
+
+export function submitAttempt(db: Db, userId: string, attemptId: string) {
+  const attempt = must(get<Row>(db, "SELECT * FROM attempts WHERE id = ? AND user_id = ?", attemptId, userId));
+  if (attempt.status !== "in_progress") return attempt;
+  const scores = get<{ correct: number; total: number }>(db, "SELECT COALESCE(SUM(correct), 0) AS correct, COUNT(*) AS total FROM attempt_answers WHERE attempt_id = ? AND user_id = ?", attemptId, userId);
+  const at = nowIso();
+  const correct = Number(scores?.correct ?? 0);
+  const total = Number(scores?.total ?? 0);
+  run(db, "UPDATE attempts SET status = 'submitted', submitted_at = ?, score_correct = ?, score_total = ? WHERE id = ? AND user_id = ?", at, correct, total, attemptId, userId);
+  activity(db, userId, "attempt_submitted", { attemptId, correct, total }, at);
+  refreshMisconceptions(db, userId);
+  return must(get(db, "SELECT * FROM attempts WHERE id = ? AND user_id = ?", attemptId, userId));
+}
+
+export function interruptAttempt(db: Db, userId: string, attemptId: string) {
+  const result = run(db, "UPDATE attempts SET status = 'interrupted', interrupted = 1, submitted_at = NULL, score_correct = NULL, score_total = NULL WHERE id = ? AND user_id = ? AND status = 'in_progress'", attemptId, userId);
+  if (result.changes !== 1) throw new AppError("attempt_closed", "Attempt is not open.");
+  return must(get(db, "SELECT * FROM attempts WHERE id = ? AND user_id = ?", attemptId, userId));
+}
+
+export function refreshMisconceptions(db: Db, userId: string): void {
+  const wrong = all<{ question_id: string; attempt_id: string; topic_id: string | null }>(
+    db,
+    `SELECT aa.question_id, aa.attempt_id, a.topic_id FROM attempt_answers aa
+     JOIN attempts a ON a.id = aa.attempt_id
+     WHERE aa.user_id = ? AND aa.correct = 0 AND a.status = 'submitted'`,
+    userId,
+  );
+  const groups = new Map<string, { attempts: string[]; topicId: string | null }>();
+  for (const row of wrong) {
+    const group = groups.get(row.question_id) ?? { attempts: [], topicId: row.topic_id };
+    group.attempts.push(row.attempt_id);
+    groups.set(row.question_id, group);
+  }
+  for (const [questionId, group] of groups) {
+    if (group.attempts.length < 2) continue;
+    const existing = get<{ id: string; status: string }>(db, "SELECT id, status FROM misconception_records WHERE user_id = ? AND question_id = ?", userId, questionId);
+    if (existing?.status === "corrected") continue;
+    const evidence = JSON.stringify({ questionId, attemptIds: group.attempts, hypothesis: true, diagnosis: false });
+    if (existing) {
+      run(db, "UPDATE misconception_records SET evidence_json = ?, updated_at = ?, status = 'hypothesis' WHERE id = ?", evidence, nowIso(), existing.id);
+    } else {
+      run(db, "INSERT INTO misconception_records (id, user_id, topic_id, question_id, status, evidence_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'hypothesis', ?, ?, ?)", newId(), userId, group.topicId, questionId, evidence, nowIso(), nowIso());
+    }
+  }
+}
+
+export function listMisconceptions(db: Db, userId: string) {
+  const hypotheses = all(db, "SELECT * FROM misconception_records WHERE user_id = ? AND status = 'hypothesis'", userId);
+  const singles = all<{ question_id: string; n: number }>(
+    db,
+    `SELECT aa.question_id, COUNT(*) AS n FROM attempt_answers aa JOIN attempts a ON a.id = aa.attempt_id
+     WHERE aa.user_id = ? AND aa.correct = 0 AND a.status = 'submitted' GROUP BY aa.question_id HAVING n = 1`,
+    userId,
+  );
+  return { hypotheses, singleErrorsAreNotHypotheses: singles, diagnosis: false };
+}
+
+export function correctMisconception(db: Db, userId: string, id: string) {
+  const result = run(db, "UPDATE misconception_records SET status = 'corrected', updated_at = ? WHERE id = ? AND user_id = ?", nowIso(), id, userId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
+}
+
+export function twin(db: Db, userId: string, topicId: string) {
+  const topic = must(get<{ self_reported_level: string }>(db, "SELECT self_reported_level FROM topics WHERE id = ? AND user_id = ?", topicId, userId));
+  const scores = get<{ correct: number; total: number }>(db, "SELECT COALESCE(SUM(score_correct), 0) AS correct, COALESCE(SUM(score_total), 0) AS total FROM attempts WHERE user_id = ? AND topic_id = ? AND status = 'submitted'", userId, topicId);
+  const games = get<{ n: number }>(db, "SELECT COUNT(*) AS n FROM game_results WHERE user_id = ?", userId);
+  return {
+    selfReportedLevel: topic.self_reported_level,
+    selfReportIsNotMeasuredAbility: true,
+    evidence: Number(scores?.total ?? 0) === 0 ? null : { correct: Number(scores?.correct ?? 0), total: Number(scores?.total ?? 0) },
+    mastery: null,
+    usesDemographics: false,
+    gameResultsIgnored: Number(games?.n ?? 0),
+  };
+}
+
+export function createTask(db: Db, userId: string, input: { title: string; courseId?: string; topicId?: string; dueAt?: string; origin: string; confirmed: boolean; reason?: string }) {
+  const id = newId();
+  const at = nowIso();
+  run(db, "INSERT INTO tasks (id, user_id, course_id, topic_id, title, due_at, status, origin, confirmed, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)", id, userId, input.courseId ?? null, input.topicId ?? null, input.title, input.dueAt ?? null, input.origin, input.confirmed ? 1 : 0, input.reason ?? "", at);
+  if (input.confirmed && input.dueAt) notify(db, userId, "task_due", input.title, input.reason ?? "", `task:${id}`, at);
+  return must(get<Row>(db, "SELECT * FROM tasks WHERE id = ? AND user_id = ?", id, userId));
+}
+
+export function confirmTask(db: Db, userId: string, taskId: string) {
+  const result = run(db, "UPDATE tasks SET confirmed = 1, rev = rev + 1 WHERE id = ? AND user_id = ?", taskId, userId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
+}
+
+export function completeTask(db: Db, userId: string, taskId: string) {
+  const result = run(db, "UPDATE tasks SET status = 'done', rev = rev + 1 WHERE id = ? AND user_id = ? AND confirmed = 1", taskId, userId);
+  if (result.changes !== 1) throw new AppError("not_confirmed", "Only a confirmed task can be completed.");
+  activity(db, userId, "task_completed", { taskId });
+}
+
+export function startSession(db: Db, userId: string, input: { courseId?: string; topicId?: string; kind: string }, at = nowIso()) {
+  const id = newId();
+  run(db, "INSERT INTO study_sessions (id, user_id, course_id, topic_id, started_at, status, kind) VALUES (?, ?, ?, ?, ?, 'active', ?)", id, userId, input.courseId ?? null, input.topicId ?? null, at, input.kind);
+  return id;
+}
+
+export function pauseSession(db: Db, userId: string, sessionId: string, additionalPausedMs: number) {
+  const result = run(db, "UPDATE study_sessions SET paused_ms = paused_ms + ?, status = 'paused' WHERE id = ? AND user_id = ? AND status IN ('active', 'paused')", additionalPausedMs, sessionId, userId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
+}
+
+export function completeSession(db: Db, userId: string, sessionId: string, at = nowIso()) {
+  const session = must(get<{ started_at: string; paused_ms: number; status: string }>(db, "SELECT started_at, paused_ms, status FROM study_sessions WHERE id = ? AND user_id = ?", sessionId, userId));
+  if (session.status === "completed") return session;
+  run(db, "UPDATE study_sessions SET status = 'completed', ended_at = ? WHERE id = ? AND user_id = ?", at, sessionId, userId);
+  return { minutes: recordedMinutes(session.started_at, at, session.paused_ms), mastery: null };
+}
+
+export function mission(db: Db, userId: string, todayIso: string) {
+  const profile = must(get<{ timezone: string }>(db, "SELECT timezone FROM profiles WHERE user_id = ?", userId));
+  const active = get<Row>(db, "SELECT * FROM study_sessions WHERE user_id = ? AND status IN ('active', 'paused') ORDER BY started_at DESC LIMIT 1", userId);
+  const task = get<Row>(db, "SELECT * FROM tasks WHERE user_id = ? AND status = 'open' AND confirmed = 1 ORDER BY due_at IS NULL, due_at LIMIT 1", userId);
+  const attempts = get<{ correct: number; total: number }>(db, "SELECT COALESCE(SUM(score_correct), 0) AS correct, COALESCE(SUM(score_total), 0) AS total FROM attempts WHERE user_id = ? AND status = 'submitted'", userId);
+  const tasks = get<{ done: number; total: number }>(db, "SELECT SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done, COUNT(*) AS total FROM tasks WHERE user_id = ? AND confirmed = 1", userId);
+  const minutesRow = all<{ started_at: string; ended_at: string; paused_ms: number }>(db, "SELECT started_at, ended_at, paused_ms FROM study_sessions WHERE user_id = ? AND status = 'completed'", userId);
+  const minutes = minutesRow.reduce((sum, row) => sum + recordedMinutes(row.started_at, row.ended_at, row.paused_ms), 0);
+  const dates = minutesRow.map((row) => localDate(row.ended_at, profile.timezone));
+  const exams = all(db, "SELECT id, title, exam_date FROM exams WHERE user_id = ? ORDER BY exam_date", userId);
+  return {
+    resumable: active ? { kind: "session", reason: "A study session is still open.", record: active } : task ? { kind: "task", reason: "The earliest confirmed open task.", record: task } : null,
+    attempts: Number(attempts?.total ?? 0) === 0 ? null : { correct: Number(attempts?.correct ?? 0), total: Number(attempts?.total ?? 0) },
+    plan: Number(tasks?.total ?? 0) === 0 ? null : { done: Number(tasks?.done ?? 0), total: Number(tasks?.total ?? 0) },
+    recordedMinutes: minutes,
+    streak: studyStreak(dates, todayIso),
+    exams,
+    seeded: false,
+  };
+}
+
+export function productAttemptCount(db: Db): number {
+  return Number(get<{ n: number }>(db, "SELECT COUNT(*) AS n FROM attempts a JOIN users u ON u.id = a.user_id WHERE u.data_class = 'learner' AND a.status = 'submitted'")?.n ?? 0);
+}
+
+export function proposeCram(db: Db, userId: string, input: { courseId: string; title: string; examDate: string; availableHours: number; syllabus: string }) {
+  const topics = all<{ id: string; name: string }>(db, "SELECT id, name FROM topics WHERE user_id = ? AND course_id = ?", userId, input.courseId);
+  const priorities = topics.map((topic) => {
+    const scores = get<{ correct: number; total: number }>(db, "SELECT COALESCE(SUM(score_correct), 0) AS correct, COALESCE(SUM(score_total), 0) AS total FROM attempts WHERE user_id = ? AND topic_id = ? AND status = 'submitted'", userId, topic.id);
+    const total = scores?.total ?? 0;
+    const accuracy = total === 0 ? null : (scores?.correct ?? 0) / total;
+    return { topicId: topic.id, name: topic.name, accuracy, reason: total === 0 ? "no attempts yet" : "lower recorded accuracy is listed first" };
+  });
+  priorities.sort((a, b) => (a.accuracy ?? -1) - (b.accuracy ?? -1));
+  const suggestedHours = priorities.length;
+  return {
+    priorities,
+    suggestedHours,
+    insufficientTime: suggestedHours > input.availableHours,
+    predictsFutureQuestions: false,
+    examDate: input.examDate,
+    syllabus: input.syllabus,
+    title: input.title,
+    courseId: input.courseId,
+    availableHours: input.availableHours,
+  };
+}
+
+export function confirmCram(db: Db, userId: string, proposal: ReturnType<typeof proposeCram>) {
+  const examId = newId();
+  run(db, "INSERT INTO exams (id, user_id, course_id, title, exam_date, available_hours, syllabus_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", examId, userId, proposal.courseId, proposal.title, proposal.examDate, proposal.availableHours, proposal.syllabus, nowIso());
+  const taskIds = proposal.priorities.map((item) => (createTask(db, userId, { title: `Revise ${item.name}`, courseId: proposal.courseId, topicId: item.topicId, origin: "suggestion", confirmed: true, reason: item.reason }) as { id: string }).id);
+  return { examId, taskIds, insufficientTime: proposal.insufficientTime };
+}
+
+export function proposeAutopilot(db: Db, userId: string, courseId: string) {
+  const open = all<{ id: string; title: string; due_at: string | null }>(db, "SELECT id, title, due_at FROM tasks WHERE user_id = ? AND course_id = ? AND status = 'open'", userId, courseId);
+  const due = open.map((task) => task.due_at).filter(Boolean);
+  const conflicts = due.filter((value, index) => due.indexOf(value) !== index);
+  return {
+    before: open,
+    after: open.map((task) => task.title),
+    conflicts,
+    applied: false,
+  };
+}
+
+export function confirmAutopilot(db: Db, userId: string, proposal: ReturnType<typeof proposeAutopilot>) {
+  const id = newId();
+  run(db, "INSERT INTO autopilot_proposals (id, user_id, diff_json, conflicts_json, status, created_at) VALUES (?, ?, ?, ?, 'confirmed', ?)", id, userId, JSON.stringify({ before: proposal.before, after: proposal.after }), JSON.stringify(proposal.conflicts), nowIso());
+  return { id, status: "confirmed" as const };
+}
+
+export function createCircle(db: Db, ownerId: string, name: string) {
+  const id = newId();
+  const at = nowIso();
+  transaction(db, () => {
+    run(db, "INSERT INTO circles (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)", id, ownerId, name, at);
+    run(db, "INSERT INTO circle_members (circle_id, user_id, role, status, created_at) VALUES (?, ?, 'owner', 'active', ?)", id, ownerId, at);
+  });
+  return id;
+}
+
+export function inviteToCircle(db: Db, ownerId: string, circleId: string, email: string) {
+  const circle = must(get<{ id: string }>(db, "SELECT id FROM circles WHERE id = ? AND owner_id = ?", circleId, ownerId));
+  const user = get<{ id: string }>(db, "SELECT id FROM users WHERE email = ?", email.trim().toLowerCase());
+  if (!user) return { status: "not_found" as const, invited: false };
+  run(db, "INSERT OR REPLACE INTO circle_members (circle_id, user_id, role, status, revoked_at, created_at) VALUES (?, ?, 'member', 'pending', NULL, ?)", circle.id, user.id, nowIso());
+  notify(db, user.id, "circle_invite", "Study circle invite", "Accept the invite on the server before any shared read.", `invite:${circleId}:${user.id}`);
+  return { status: "pending" as const, invited: true, userId: user.id };
+}
+
+function activeMember(db: Db, circleId: string, userId: string): boolean {
+  return Boolean(get(db, "SELECT 1 FROM circle_members WHERE circle_id = ? AND user_id = ? AND status = 'active'", circleId, userId));
+}
+
+export function acceptInvite(db: Db, userId: string, circleId: string) {
+  const result = run(db, "UPDATE circle_members SET status = 'active' WHERE circle_id = ? AND user_id = ? AND status = 'pending'", circleId, userId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
+}
+
+export function revokeMember(db: Db, ownerId: string, circleId: string, memberId: string) {
+  must(get(db, "SELECT id FROM circles WHERE id = ? AND owner_id = ?", circleId, ownerId));
+  if (memberId === ownerId) throw new AppError("forbidden", "Owner membership stays with the circle.", 403);
+  const result = run(db, "UPDATE circle_members SET status = 'revoked', revoked_at = ? WHERE circle_id = ? AND user_id = ?", nowIso(), circleId, memberId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
+}
+
+export function audience(db: Db, circleId: string, actorId: string) {
+  if (!activeMember(db, circleId, actorId)) throw new AppError("not_found", "Not found", 404);
+  return all<{ user_id: string; role: string }>(db, "SELECT user_id, role FROM circle_members WHERE circle_id = ? AND status = 'active'", circleId);
+}
+
+export function postToCircle(db: Db, userId: string, circleId: string, body: string) {
+  const who = audience(db, circleId, userId);
+  const id = newId();
+  run(db, "INSERT INTO circle_posts (id, circle_id, user_id, body, audience_json, ack_status, created_at) VALUES (?, ?, ?, ?, ?, 'acked', ?)", id, circleId, userId, body, JSON.stringify(who), nowIso());
+  return { id, ack: true as const, audience: who };
+}
+
+export function readPosts(db: Db, userId: string, circleId: string) {
+  if (!activeMember(db, circleId, userId)) throw new AppError("not_found", "Not found", 404);
+  return all(db, "SELECT id, user_id, body, audience_json, ack_status, created_at FROM circle_posts WHERE circle_id = ?", circleId);
+}
+
+export function stageLocalPost(): { ack: false; status: "saved_on_device" } {
+  return { ack: false, status: "saved_on_device" };
+}
+
+export function putYouTubeCache(db: Db, videoId: string, payload: unknown, fetchedAt: string) {
+  run(db, "INSERT INTO youtube_cache (video_id, payload_json, fetched_at) VALUES (?, ?, ?) ON CONFLICT(video_id) DO UPDATE SET payload_json = excluded.payload_json, fetched_at = excluded.fetched_at", videoId, JSON.stringify(payload), fetchedAt);
+}
+
+export function readYouTubeCache(db: Db, videoId: string, now: string): unknown | null {
+  const row = get<{ payload_json: string; fetched_at: string }>(db, "SELECT payload_json, fetched_at FROM youtube_cache WHERE video_id = ?", videoId);
+  if (!row || !cacheFresh(row.fetched_at, now)) return null;
+  return JSON.parse(row.payload_json);
+}
+
+export function purgeExpiredYouTubeCache(db: Db, now: string): number {
+  const rows = all<{ video_id: string; fetched_at: string }>(db, "SELECT video_id, fetched_at FROM youtube_cache");
+  let removed = 0;
+  for (const row of rows) {
+    if (!cacheFresh(row.fetched_at, now)) {
+      run(db, "DELETE FROM youtube_cache WHERE video_id = ?", row.video_id);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+export function bookmarkVideo(db: Db, userId: string, input: { videoId: string; courseId?: string; topicId?: string; note?: string }) {
+  const id = newId();
+  run(db, "INSERT INTO video_bookmarks (id, user_id, video_id, course_id, topic_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, input.videoId, input.courseId ?? null, input.topicId ?? null, input.note ?? "", nowIso());
+  return id;
+}
+
+export function attachTranscript(db: Db, userId: string, bookmarkId: string, body: string, rightsConfirmed: boolean) {
+  if (!rightsConfirmed) throw new AppError("rights_required", "A learner-supplied transcript needs an explicit rights confirmation.");
+  must(get(db, "SELECT id FROM video_bookmarks WHERE id = ? AND user_id = ?", bookmarkId, userId));
+  const id = newId();
+  run(db, "INSERT INTO transcripts (id, user_id, bookmark_id, body, provenance, rights_confirmed, created_at) VALUES (?, ?, ?, ?, 'learner_authorized', 1, ?)", id, userId, bookmarkId, body, nowIso());
+  return id;
+}
+
+export function canPracticeFromBookmark(db: Db, userId: string, bookmarkId: string): { allowed: boolean; reason: string } {
+  const transcript = get(db, "SELECT id FROM transcripts WHERE bookmark_id = ? AND user_id = ? AND rights_confirmed = 1", bookmarkId, userId);
+  if (!transcript) return { allowed: false, reason: "transcript_not_legitimately_available" };
+  return { allowed: true, reason: "learner_authorized_transcript" };
+}
+
+export function addGraphNode(db: Db, userId: string, label: string, topicId?: string) {
+  const id = newId();
+  run(db, "INSERT INTO graph_nodes (id, user_id, topic_id, label, created_at) VALUES (?, ?, ?, ?, ?)", id, userId, topicId ?? null, label, nowIso());
+  return id;
+}
+
+export function addGraphEdge(db: Db, userId: string, fromId: string, toId: string, origin: "learner" | "inferred") {
+  const id = newId();
+  run(db, "INSERT INTO graph_edges (id, user_id, from_id, to_id, origin, academic_verification, created_at) VALUES (?, ?, ?, ?, ?, 'not_verified', ?)", id, userId, fromId, toId, origin, nowIso());
+  return id;
+}
+
+export function lensDecision(input: { mode: "text" | "image"; consent: boolean; route: RouteInput }): { status: string; imageAnalysis: false; interpretation: null; reason: string } {
+  if (input.mode === "text") return { status: "text_only", imageAnalysis: false, interpretation: null, reason: "text_is_not_image_analysis" };
+  if (!input.consent) return { status: "denied", imageAnalysis: false, interpretation: null, reason: "consent_required" };
+  const plan = planRoute({ ...input.route, required: ["image"] });
+  return { status: "denied", imageAnalysis: false, interpretation: null, reason: plan.status === "unavailable" ? plan.reason : "image_route_not_executed" };
+}
+
+export function createChat(db: Db, userId: string, title: string, courseId?: string, topicId?: string) {
+  const id = newId();
+  const at = nowIso();
+  run(db, "INSERT INTO chats (id, user_id, course_id, topic_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, courseId ?? null, topicId ?? null, title, at, at);
+  return id;
+}
+
+export function askTutor(db: Db, userId: string, chatId: string, question: string, route: RouteInput) {
+  must(get(db, "SELECT id FROM chats WHERE id = ? AND user_id = ?", chatId, userId));
+  const plan = planRoute(route);
+  const at = nowIso();
+  run(db, "INSERT INTO messages (id, chat_id, user_id, role, content, status, routing_json, created_at) VALUES (?, ?, ?, 'user', ?, 'stored', ?, ?)", newId(), chatId, userId, question, JSON.stringify({ answer: false }), at);
+  run(db, "INSERT INTO provider_attempts (id, user_id, provider, model, state, billing_note, task, created_at) VALUES (?, ?, ?, ?, 'not_sent', 'no charge attempted', ?, ?)", newId(), userId, plan.primary?.provider ?? null, plan.primary?.model ?? null, route.task, at);
+  run(db, "INSERT INTO messages (id, chat_id, user_id, role, content, provider, model, status, routing_json, created_at) VALUES (?, ?, ?, 'status', ?, ?, ?, 'unavailable', ?, ?)", newId(), chatId, userId, plan.reason, plan.primary?.provider ?? null, plan.primary?.model ?? null, JSON.stringify(plan), at);
+  const assistantAnswers = get<{ n: number }>(db, "SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND role = 'assistant'", chatId);
+  return { plan, fabricatedAnswer: false, assistantMessages: assistantAnswers?.n ?? 0 };
+}
+
+export function saveLab(db: Db, userId: string, input: { lab: string; params: unknown; result: unknown; assumptions: string; courseId?: string; topicId?: string }) {
+  const id = newId();
+  run(db, "INSERT INTO lab_runs (id, user_id, course_id, topic_id, lab, params_json, result_json, assumptions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", id, userId, input.courseId ?? null, input.topicId ?? null, input.lab, JSON.stringify(input.params), JSON.stringify(input.result), input.assumptions, nowIso());
+  return id;
+}
+
+export function saveGame(db: Db, userId: string, score: number, total: number) {
+  const id = newId();
+  run(db, "INSERT INTO game_results (id, user_id, game, score, total, learning_claim, created_at) VALUES (?, ?, 'built_in_practice', ?, ?, 'not_mastery', ?)", id, userId, score, total, nowIso());
+  return id;
+}
+
+export function applyArtifactUpdate(db: Db, userId: string, artifactId: string, baseRev: number, body: string, idempotencyKey: string) {
+  const prior = get<{ response_json: string }>(db, "SELECT response_json FROM sync_log WHERE user_id = ? AND idempotency_key = ?", userId, idempotencyKey);
+  if (prior) return JSON.parse(prior.response_json) as { status: string; rev?: number; server?: unknown; clientBody?: string };
+  const current = must(get<{ rev: number; body: string }>(db, "SELECT rev, body FROM artifacts WHERE id = ? AND user_id = ?", artifactId, userId));
+  if (current.rev !== baseRev) {
+    const response = { status: "conflict", server: current, clientBody: body };
+    run(db, "INSERT INTO sync_log (id, user_id, idempotency_key, entity, entity_id, base_rev, result, response_json, created_at) VALUES (?, ?, ?, 'artifact', ?, ?, 'conflict', ?, ?)", newId(), userId, idempotencyKey, artifactId, baseRev, JSON.stringify(response), nowIso());
+    return response;
+  }
+  run(db, "UPDATE artifacts SET body = ?, rev = rev + 1, updated_at = ? WHERE id = ? AND user_id = ? AND rev = ?", body, nowIso(), artifactId, userId, baseRev);
+  const response = { status: "acked", rev: baseRev + 1, body };
+  run(db, "INSERT INTO sync_log (id, user_id, idempotency_key, entity, entity_id, base_rev, result, response_json, created_at) VALUES (?, ?, ?, 'artifact', ?, ?, 'acked', ?, ?)", newId(), userId, idempotencyKey, artifactId, baseRev, JSON.stringify(response), nowIso());
+  return response;
+}
+
+export function exportAccount(db: Db, userId: string) {
+  must(get(db, "SELECT id FROM users WHERE id = ?", userId));
+  const tables = ["profiles", "courses", "topics", "sources", "artifacts", "decks", "cards", "card_reviews", "questions", "attempts", "attempt_answers", "tasks", "study_sessions", "video_bookmarks", "transcripts", "graph_nodes", "graph_edges", "misconception_records", "messages", "exams", "lab_runs", "game_results", "notifications"];
+  const data: Record<string, unknown[]> = {};
+  for (const table of tables) data[table] = all(db, `SELECT * FROM ${table} WHERE user_id = ?`, userId);
+  return { userId, dataClass: get<{ data_class: string }>(db, "SELECT data_class FROM users WHERE id = ?", userId)?.data_class, data };
+}
+
+export function deleteAccount(db: Db, userId: string): void {
+  must(get(db, "SELECT id FROM users WHERE id = ?", userId));
+  run(db, "DELETE FROM users WHERE id = ?", userId);
+}
+
+export function renameChat(db: Db, userId: string, chatId: string, title: string) {
+  const result = run(db, "UPDATE chats SET title = ?, rev = rev + 1, updated_at = ? WHERE id = ? AND user_id = ?", title, nowIso(), chatId, userId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
+}
+
+export function deleteChat(db: Db, userId: string, chatId: string) {
+  const result = run(db, "DELETE FROM chats WHERE id = ? AND user_id = ?", chatId, userId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
+}
+
+export function grantPrivacy(db: Db, userId: string, provider: string, purpose: string) {
+  run(db, "INSERT OR REPLACE INTO privacy_grants (user_id, provider, purpose, granted_at) VALUES (?, ?, ?, ?)", userId, provider, purpose, nowIso());
+}
+
+export function listNotifications(db: Db, userId: string) {
+  return all(db, "SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at", userId);
+}
+
+export function markNotificationRead(db: Db, userId: string, id: string) {
+  const result = run(db, "UPDATE notifications SET read_at = ? WHERE id = ? AND user_id = ?", nowIso(), id, userId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
+}
