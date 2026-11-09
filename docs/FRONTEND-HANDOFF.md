@@ -1,6 +1,10 @@
 # Frontend handoff
 
-Design Teammate owns presentational screens, components, layout, and styles on a separate branch once G0 agrees the contract. This branch keeps the existing scaffold in place and does not replace it.
+Frontend work is a separate authorized workstream. It is not integrated here. The partner base is commit `0beaaa25d2f83ea8623a0aa6eb166de0c7144c96`. This branch does not edit that allowlist: `src/components/**`, `src/app/globals.css`, `src/app/login/page.tsx`, `src/app/register/page.tsx`, `src/app/(study)/layout.tsx`, presentational `page.tsx` files under that tree, `src/nav.ts`, and frontend-only tests.
+
+`src/app/actions.ts` is backend-owned server wiring. It is marked `use server` and may import the domain. Browser modules must not import `src/domain.ts`, `src/db.ts`, `src/server/*`, or `node:sqlite`. New UI should call relative `/api` on the same host and port. There is no CORS allowlist.
+
+`src/components/screens.tsx` `Games` still names `total` in its props type and renders `{total}` without destructuring it. That defect belongs to the frontend workstream. `npm run typecheck` is the full-app check and is expected to fail there until they fix it. `npm run typecheck:backend` checks the server project only and is not an app typecheck.
 
 ## Preserved scaffold
 
@@ -35,7 +39,7 @@ Shared response names live in `src/contract/types.ts`.
 - Flags: `HttpOnly`, `Path=/`, `SameSite=Lax`, `Max-Age` 14 days
 - `Secure` is added only when `UNIBUD_COOKIE_SECURE=1`
 - Mutating requests must send header `X-Unibud-Request: 1`
-- If `Origin` is sent, its host must match `Host` (or `X-Forwarded-Host`). A mismatch returns `{ "error": "csrf_origin" }` with status 403
+- If `Origin` is sent, its host must match the `Host` header. `X-Forwarded-Host` is not trusted. A mismatch returns `{ "error": "csrf_origin" }` with status 403
 - Missing the custom header returns `{ "error": "csrf_required" }` with status 403
 - The cookie value is the session token. The server stores only its SHA-256
 

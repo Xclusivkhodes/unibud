@@ -17,11 +17,12 @@ Founder visual approval for the glass direction and owl rasters is recorded in `
 ```bash
 npm install
 npm test
+npm run typecheck:backend
 npm run typecheck
-npm run serve
+npm run dev
 ```
 
-`npm run serve` listens on `127.0.0.1` and `PORT` (default 3000) and serves `/api/*` only. `npm run typecheck` does not include the unfinished screen files. Do not point a public host at this process.
+`npm run dev` and `npm start` serve the Next app and `/api` on `127.0.0.1:3000`. The browser should call relative `/api`. `npm run serve` runs the same API handler alone on that default port; do not run it beside Next. `npm run typecheck:backend` is the server project only. `npm run typecheck` is the full app check and currently fails in `src/components/screens.tsx` because `Games` uses `total` without destructuring it. That failure is not a green app typecheck.
 
 ## Environment variable names
 

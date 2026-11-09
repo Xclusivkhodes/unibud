@@ -250,7 +250,7 @@ test("connected learning records stay owned and fixture metrics stay separate", 
   expect(pack.body).toContain(source.id);
   const deck = createDeck(database, learner.id, { title: "Acids", courseId: course.id, topicId: topic.id, sourceId: source.id }) as { id: string };
   const card = addCard(database, learner.id, { deckId: deck.id, front: "What does a strong acid donate?", back: "a proton", sourceId: source.id, label: "sourced" }) as { id: string };
-  expect(() => reviewCard(database, learner.id, card.id, 5, false, "self_rated")).toThrow(/reveal/);
+  expect(() => reviewCard(database, learner.id, card.id, 5, false, "self_rated")).toThrow(/reveal/i);
   const reviewed = reviewCard(database, learner.id, card.id, 5, true, "self_rated", "2026-11-09T00:00:00.000Z");
   expect(reviewed.scheduler).toBe("deterministic-sm2");
   expect(reviewed.mastery).toBeNull();

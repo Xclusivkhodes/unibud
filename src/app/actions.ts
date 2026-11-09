@@ -1,5 +1,8 @@
 "use server";
 
+// Server-only adapter. Browser code must not import this module's domain or database dependencies.
+// New frontend work should call same-origin /api. This file stays on the backend side of the handoff.
+
 import { redirect } from "next/navigation";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";

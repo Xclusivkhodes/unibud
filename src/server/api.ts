@@ -5,8 +5,10 @@ import {
   addQuestion,
   addSource,
   answerAttempt,
-  confirmAutopilot,
-  confirmCram,
+  confirmAutopilotPreview,
+  confirmCramPreview,
+  issueAutopilotPreview,
+  issueCramPreview,
   createCircle,
   createCourse,
   createTask,
@@ -19,8 +21,6 @@ import {
   login,
   logout,
   postToCircle,
-  proposeAutopilot,
-  proposeCram,
   readPosts,
   registerUser,
   revokeMember,
@@ -35,16 +35,20 @@ import { GOOGLE_LIVE_USE, REGISTRY, googlePolicyFailures, type RouteInput } from
 import { AppError } from "../security/crypto.js";
 import { captionDownloadStatus } from "../youtube/api.js";
 import { SESSION_COOKIE, sessionCookie, tokenFromRequest } from "./http.js";
+import { assertBodyBudget, reserveInflight } from "./limits.js";
+import { handleOwnedResources } from "./resources.js";
 
 const MAX_BODY = 100_000;
 
 function json(body: unknown, status = 200, extra?: HeadersInit): Response {
   const headers = new Headers(extra);
   headers.set("content-type", "application/json; charset=utf-8");
+  headers.set("cache-control", "private, no-store");
+  headers.set("pragma", "no-cache");
   return new Response(JSON.stringify(body), { status, headers });
 }
 
-function fail(error: unknown): Response {
+export function toErrorResponse(error: unknown): Response {
   if (error instanceof AppError) return json({ error: error.code }, error.status);
   return json({ error: "internal" }, 500);
 }
@@ -72,8 +76,8 @@ function assertMutation(request: Request): void {
   } catch {
     throw new AppError("csrf_origin", "Origin was rejected.", 403);
   }
-  const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  if (host && originHost !== host) throw new AppError("csrf_origin", "Origin was rejected.", 403);
+  const host = request.headers.get("host");
+  if (!host || originHost !== host) throw new AppError("csrf_origin", "Origin was rejected.", 403);
 }
 
 function user(db: Db, request: Request) {
@@ -112,7 +116,10 @@ export async function handleApi(request: Request, db: Db): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/$/, "") || "/";
   const method = request.method.toUpperCase();
+  let release = () => {};
   try {
+    assertBodyBudget(request);
+    release = reserveInflight(tokenFromRequest(request) ?? "anonymous");
     if (method !== "GET" && method !== "HEAD") assertMutation(request);
     if (path === "/api/auth/register" && method === "POST") {
       const body = await readJson(request);
@@ -255,24 +262,26 @@ export async function handleApi(request: Request, db: Db): Promise<Response> {
       const body = await readJson(request);
       const availableHours = Number(body.availableHours);
       if (!Number.isFinite(availableHours)) throw new AppError("invalid_hours", "Hours were rejected.", 400);
-      return json(proposeCram(db, actor.id, { courseId: str(body.courseId), title: str(body.title), examDate: str(body.examDate), availableHours, syllabus: str(body.syllabus), now: str(body.now) || undefined }));
+      return json(issueCramPreview(db, actor.id, { courseId: str(body.courseId), title: str(body.title), examDate: str(body.examDate), availableHours, syllabus: str(body.syllabus), now: str(body.now) || undefined }));
     }
     if (path === "/api/cram/confirm" && method === "POST") {
       const actor = user(db, request);
       const body = await readJson(request);
-      const proposal = proposeCram(db, actor.id, { courseId: str(body.courseId), title: str(body.title), examDate: str(body.examDate), availableHours: Number(body.availableHours), syllabus: str(body.syllabus), now: str(body.now) || undefined });
-      return json(confirmCram(db, actor.id, proposal), 201);
+      if (!str(body.previewId)) throw new AppError("preview_required", "Confirm the preview token.", 400);
+      const result = confirmCramPreview(db, actor.id, str(body.previewId));
+      return json(result, result.applied ? 201 : 409);
     }
     if (path === "/api/autopilot/preview" && method === "POST") {
       const actor = user(db, request);
       const body = await readJson(request);
-      return json(proposeAutopilot(db, actor.id, str(body.courseId), str(body.now) || undefined));
+      return json(issueAutopilotPreview(db, actor.id, str(body.courseId), str(body.now) || undefined));
     }
     if (path === "/api/autopilot/confirm" && method === "POST") {
       const actor = user(db, request);
       const body = await readJson(request);
-      const proposal = proposeAutopilot(db, actor.id, str(body.courseId), str(body.now) || undefined);
-      return json(confirmAutopilot(db, actor.id, proposal));
+      if (!str(body.previewId)) throw new AppError("preview_required", "Confirm the preview token.", 400);
+      const result = confirmAutopilotPreview(db, actor.id, str(body.previewId));
+      return json(result, result.applied ? 200 : 409);
     }
     if (path === "/api/misconceptions" && method === "GET") {
       const actor = user(db, request);
@@ -326,9 +335,13 @@ export async function handleApi(request: Request, db: Db): Promise<Response> {
       deleteAccount(db, actor.id);
       return json({ deleted: true }, 200, { "set-cookie": `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0` });
     }
+    const owned = await handleOwnedResources(request, db, path, method);
+    if (owned) return owned;
     if (path.startsWith("/api/")) return json({ error: "not_found" }, 404);
     return json({ error: "not_found" }, 404);
   } catch (error) {
-    return fail(error);
+    return toErrorResponse(error);
+  } finally {
+    release();
   }
 }

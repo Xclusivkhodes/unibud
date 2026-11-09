@@ -187,7 +187,15 @@ export function addCard(db: Db, userId: string, input: { deckId: string; front: 
 
 export function reviewCard(db: Db, userId: string, cardId: string, quality: number, revealed: boolean, scoringMethod: "self_rated" | "objective", at = nowIso()) {
   const card = must(get<{ ease: number; interval_days: number; repetitions: number }>(db, "SELECT ease, interval_days, repetitions FROM cards WHERE id = ? AND user_id = ?", cardId, userId));
-  const next = reviewSm2({ ease: card.ease, intervalDays: card.interval_days, repetitions: card.repetitions, dueAt: null }, quality, at, revealed);
+  let next;
+  try {
+    next = reviewSm2({ ease: card.ease, intervalDays: card.interval_days, repetitions: card.repetitions, dueAt: null }, quality, at, revealed);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "reveal_required") throw new AppError("reveal_required", "Reveal the answer first.", 400);
+    if (message === "invalid_quality") throw new AppError("invalid_quality", "Rating was rejected.", 400);
+    throw error;
+  }
   transaction(db, () => {
     run(db, "UPDATE cards SET ease = ?, interval_days = ?, repetitions = ?, due_at = ?, rev = rev + 1 WHERE id = ? AND user_id = ?", next.ease, next.intervalDays, next.repetitions, next.dueAt, cardId, userId);
     run(
@@ -444,6 +452,23 @@ function topicEvidence(db: Db, userId: string, topicId: string): { correct: numb
   return { correct: Number(scores?.correct ?? 0), total: Number(scores?.total ?? 0) };
 }
 
+export const DUE_SEMANTICS = "calendar_day" as const;
+
+function dayStamp(day: string): string {
+  return `${day}T00:00:00.000Z`;
+}
+
+function daysInWindow(startDay: string, endDay: string): string[] {
+  if (endDay < startDay) return [];
+  const days: string[] = [];
+  let cursor = startDay;
+  while (cursor <= endDay && days.length < 366) {
+    days.push(cursor);
+    cursor = shiftDate(cursor, 1);
+  }
+  return days;
+}
+
 export function proposeCram(db: Db, userId: string, input: { courseId: string; title: string; examDate: string; availableHours: number; syllabus: string; now?: string }) {
   const topics = all<{ id: string; name: string }>(db, "SELECT id, name FROM topics WHERE user_id = ? AND course_id = ?", userId, input.courseId);
   const priorities = topics.map((topic) => {
@@ -456,29 +481,36 @@ export function proposeCram(db: Db, userId: string, input: { courseId: string; t
   const now = input.now ?? nowIso();
   const today = now.slice(0, 10);
   const examDay = input.examDate.slice(0, 10);
-  const span = Math.round((Date.parse(`${examDay}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+  const days = daysInWindow(today, examDay);
   const totalMinutes = Math.max(0, Math.round(input.availableHours * 60));
   const neededMinutes = priorities.length * 30;
-  const insufficientTime = span < 0 || totalMinutes < neededMinutes;
-  const dayCount = span < 0 ? 0 : span + 1;
+  const insufficientTime = days.length === 0 || totalMinutes < neededMinutes;
   const weights = priorities.map((item) => (item.accuracy === null ? 2 : 1 + (1 - item.accuracy)));
   const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
   const scheduled = priorities.map((item, index) => {
     const minutes = weightSum === 0 || totalMinutes === 0 ? 0 : Math.floor((totalMinutes * weights[index]) / weightSum);
-    const dueAt = dayCount === 0 || minutes === 0 ? null : `${shiftDate(today, index % dayCount)}T09:00:00.000Z`;
-    return { ...item, minutes, dueAt };
+    const dueDay = days.length === 0 || minutes === 0 ? null : days[index % days.length];
+    return { ...item, minutes, dueDay, dueAt: dueDay ? dayStamp(dueDay) : null, dueSemantics: DUE_SEMANTICS };
   });
   let remainder = totalMinutes - scheduled.reduce((sum, item) => sum + item.minutes, 0);
   for (let index = 0; index < scheduled.length && remainder > 0; index += 1) {
     scheduled[index].minutes += 1;
     remainder -= 1;
-    if (!scheduled[index].dueAt && dayCount > 0) scheduled[index].dueAt = `${shiftDate(today, index % dayCount)}T09:00:00.000Z`;
+    if (!scheduled[index].dueDay && days.length > 0) {
+      const dueDay = days[index % days.length];
+      scheduled[index].dueDay = dueDay;
+      scheduled[index].dueAt = dayStamp(dueDay);
+    }
   }
   return {
     priorities: scheduled,
     suggestedMinutes: totalMinutes,
     neededMinutes,
     insufficientTime,
+    impossible: days.length === 0,
+    windowStart: days[0] ?? null,
+    windowEnd: days[days.length - 1] ?? null,
+    dueSemantics: DUE_SEMANTICS,
     predictsFutureQuestions: false,
     examDate: input.examDate,
     syllabus: input.syllabus,
@@ -498,20 +530,40 @@ export function confirmCram(db: Db, userId: string, proposal: ReturnType<typeof 
 }
 
 export function proposeAutopilot(db: Db, userId: string, courseId: string, now = nowIso()) {
-  const open = all<{ id: string; title: string; due_at: string | null; rev: number }>(db, "SELECT id, title, due_at, rev FROM tasks WHERE user_id = ? AND course_id = ? AND status = 'open'", userId, courseId);
-  const exam = get<{ exam_date: string }>(db, "SELECT exam_date FROM exams WHERE user_id = ? AND course_id = ? ORDER BY exam_date LIMIT 1", userId, courseId);
-  const anchor = exam?.exam_date.slice(0, 10) ?? shiftDate(now.slice(0, 10), 1);
-  const seen = new Set<string>();
-  const conflicts: string[] = [];
+  const open = all<{ id: string; title: string; due_at: string | null; rev: number }>(db, "SELECT id, title, due_at, rev FROM tasks WHERE user_id = ? AND course_id = ? AND status = 'open' ORDER BY created_at", userId, courseId);
+  const exams = all<{ exam_date: string }>(db, "SELECT exam_date FROM exams WHERE user_id = ? AND course_id = ? ORDER BY exam_date", userId, courseId);
+  const today = now.slice(0, 10);
+  const futureExam = exams.map((exam) => exam.exam_date.slice(0, 10)).find((day) => day >= today) ?? null;
+  const days = futureExam ? daysInWindow(today, futureExam) : [today];
+  let undated = 0;
   const after = open.map((task) => {
-    let day = task.due_at ? task.due_at.slice(0, 10) : anchor;
-    if (seen.has(day)) conflicts.push(task.due_at ?? "undated");
-    while (seen.has(day)) day = shiftDate(day, 1);
-    seen.add(day);
-    const dueAt = `${day}T09:00:00.000Z`;
-    return { id: task.id, title: task.title, dueAt, rev: task.rev, changed: task.due_at?.slice(0, 10) !== day };
+    const currentDay = task.due_at?.slice(0, 10) ?? null;
+    const inWindow = currentDay !== null && days.includes(currentDay);
+    let dueDay = inWindow ? currentDay : null;
+    let placed = inWindow;
+    if (!currentDay && days.length > 0) {
+      dueDay = days[Math.min(undated, days.length - 1)];
+      undated += 1;
+      placed = true;
+    } else if (currentDay && !inWindow && days.length > 0) {
+      dueDay = currentDay < today ? days[0] : days[days.length - 1];
+      placed = true;
+    }
+    const dueAt = placed && dueDay ? dayStamp(dueDay) : null;
+    return {
+      id: task.id,
+      title: task.title,
+      dueDay,
+      dueAt,
+      dueSemantics: DUE_SEMANTICS,
+      rev: task.rev,
+      placed,
+      outsideWindow: currentDay !== null && !inWindow,
+      changed: placed && task.due_at !== dueAt,
+    };
   });
-  return { before: open, after, conflicts, applied: false, courseId };
+  const impossible = after.some((row) => !row.placed);
+  return { before: open, after, conflicts: after.filter((row) => row.outsideWindow).map((row) => row.id), applied: false, courseId, dueSemantics: DUE_SEMANTICS, windowStart: days[0] ?? null, windowEnd: days[days.length - 1] ?? null, impossible };
 }
 
 export function confirmAutopilot(db: Db, userId: string, proposal: ReturnType<typeof proposeAutopilot>) {
@@ -523,13 +575,68 @@ export function confirmAutopilot(db: Db, userId: string, proposal: ReturnType<ty
   if (mismatches.length > 0) return { id: null, status: "conflict" as const, applied: false, mismatches };
   let updated = 0;
   for (const row of proposal.after) {
-    if (!row.changed) continue;
+    if (!row.changed || !row.dueAt) continue;
     const result = run(db, "UPDATE tasks SET due_at = ?, rev = rev + 1 WHERE id = ? AND user_id = ? AND rev = ?", row.dueAt, row.id, userId, row.rev);
     updated += result.changes;
   }
   const id = newId();
   run(db, "INSERT INTO autopilot_proposals (id, user_id, diff_json, conflicts_json, status, created_at) VALUES (?, ?, ?, ?, 'confirmed', ?)", id, userId, JSON.stringify({ before: proposal.before, after: proposal.after }), JSON.stringify(proposal.conflicts), nowIso());
   return { id, status: "confirmed" as const, applied: true, mismatches, updated };
+}
+
+function cramFingerprint(db: Db, userId: string, input: { courseId: string; title: string; examDate: string; availableHours: number; syllabus: string; now?: string }): string {
+  const topics = all<{ id: string; name: string }>(db, "SELECT id, name FROM topics WHERE user_id = ? AND course_id = ? ORDER BY id", userId, input.courseId);
+  const snapshot = topics.map((topic) => ({ id: topic.id, name: topic.name, ...topicEvidence(db, userId, topic.id) }));
+  return sha256(JSON.stringify({ kind: "cram", courseId: input.courseId, title: input.title, examDate: input.examDate.slice(0, 10), availableHours: input.availableHours, syllabus: input.syllabus, nowDay: (input.now ?? nowIso()).slice(0, 10), topics: snapshot }));
+}
+
+function autopilotFingerprint(db: Db, userId: string, courseId: string, now: string): string {
+  const tasks = all<{ id: string; rev: number; due_at: string | null }>(db, "SELECT id, rev, due_at FROM tasks WHERE user_id = ? AND course_id = ? AND status = 'open' ORDER BY id", userId, courseId);
+  const exams = all<{ id: string; exam_date: string }>(db, "SELECT id, exam_date FROM exams WHERE user_id = ? AND course_id = ? ORDER BY id", userId, courseId);
+  return sha256(JSON.stringify({ kind: "autopilot", courseId, nowDay: now.slice(0, 10), tasks, exams }));
+}
+
+function insertPreview(db: Db, userId: string, kind: string, fingerprint: string, payload: unknown): string {
+  const id = newId();
+  run(db, "INSERT INTO schedule_previews (id, user_id, kind, fingerprint, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, userId, kind, fingerprint, JSON.stringify(payload), nowIso());
+  return id;
+}
+
+export function issueCramPreview(db: Db, userId: string, input: { courseId: string; title: string; examDate: string; availableHours: number; syllabus: string; now?: string }) {
+  const proposal = proposeCram(db, userId, input);
+  const fingerprint = cramFingerprint(db, userId, input);
+  const previewId = insertPreview(db, userId, "cram", fingerprint, { input, proposal });
+  return { previewId, fingerprint, contractVersion: 2, ...proposal };
+}
+
+export function confirmCramPreview(db: Db, userId: string, previewId: string) {
+  const row = get<{ fingerprint: string; payload_json: string; consumed_at: string | null }>(db, "SELECT fingerprint, payload_json, consumed_at FROM schedule_previews WHERE id = ? AND user_id = ? AND kind = 'cram'", previewId, userId);
+  if (!row) throw new AppError("preview_not_found", "Preview was not found.", 404);
+  if (row.consumed_at) throw new AppError("preview_consumed", "Preview was already used.", 409);
+  const payload = JSON.parse(row.payload_json) as { input: { courseId: string; title: string; examDate: string; availableHours: number; syllabus: string; now?: string }; proposal: ReturnType<typeof proposeCram> };
+  if (cramFingerprint(db, userId, payload.input) !== row.fingerprint) return { status: "stale_preview" as const, applied: false };
+  const saved = confirmCram(db, userId, payload.proposal);
+  run(db, "UPDATE schedule_previews SET consumed_at = ? WHERE id = ? AND user_id = ?", nowIso(), previewId, userId);
+  return { status: "confirmed" as const, applied: true, dueSemantics: DUE_SEMANTICS, ...saved };
+}
+
+export function issueAutopilotPreview(db: Db, userId: string, courseId: string, now = nowIso()) {
+  const proposal = proposeAutopilot(db, userId, courseId, now);
+  const fingerprint = autopilotFingerprint(db, userId, courseId, now);
+  const previewId = insertPreview(db, userId, "autopilot", fingerprint, { courseId, now, proposal });
+  return { previewId, fingerprint, contractVersion: 2, ...proposal };
+}
+
+export function confirmAutopilotPreview(db: Db, userId: string, previewId: string) {
+  const row = get<{ fingerprint: string; payload_json: string; consumed_at: string | null }>(db, "SELECT fingerprint, payload_json, consumed_at FROM schedule_previews WHERE id = ? AND user_id = ? AND kind = 'autopilot'", previewId, userId);
+  if (!row) throw new AppError("preview_not_found", "Preview was not found.", 404);
+  if (row.consumed_at) throw new AppError("preview_consumed", "Preview was already used.", 409);
+  const payload = JSON.parse(row.payload_json) as { courseId: string; now: string; proposal: ReturnType<typeof proposeAutopilot> };
+  if (autopilotFingerprint(db, userId, payload.courseId, payload.now) !== row.fingerprint) return { status: "stale_preview" as const, applied: false };
+  const saved = confirmAutopilot(db, userId, payload.proposal);
+  if (!saved.applied) return saved;
+  run(db, "UPDATE schedule_previews SET consumed_at = ? WHERE id = ? AND user_id = ?", nowIso(), previewId, userId);
+  return { ...saved, dueSemantics: DUE_SEMANTICS };
 }
 
 export function createCircle(db: Db, ownerId: string, name: string) {

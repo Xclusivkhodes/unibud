@@ -35,10 +35,10 @@ All ids are UUID strings created by the server. Queries are limited to the signe
 | GET `/api/topics/:id/evidence` | | Twin object. `evidence` is `{ correct, total }` or `null`. Counts answers whose question topic is this topic |
 | GET `/api/tasks` | | `{ tasks }` including `due_at` |
 | POST `/api/tasks` | `{ title, courseId?, topicId?, dueAt?, confirmed?, reason? }` | `201 { task }` |
-| POST `/api/cram/preview` | `{ courseId, title, examDate, availableHours, syllabus, now? }` | priorities with `minutes` and `dueAt`, plus `insufficientTime` |
-| POST `/api/cram/confirm` | same as preview | creates the exam and only the dated tasks with minutes |
-| POST `/api/autopilot/preview` | `{ courseId, now? }` | `{ before, after, conflicts, applied: false }` |
-| POST `/api/autopilot/confirm` | `{ courseId, now? }` | recomputes the proposal on the server and writes due dates. `applied` is false when a task revision changed |
+| POST `/api/cram/preview` | `{ courseId, title, examDate, availableHours, syllabus, now? }` | Contract v2. Returns `previewId`, `fingerprint`, `dueSemantics: "calendar_day"`, and the exact day buckets. `dueAt` is `YYYY-MM-DDT00:00:00.000Z`, a day-bucket serialization, not a 09:00 appointment |
+| POST `/api/cram/confirm` | `{ previewId }` | Writes that stored preview only. `409` `stale_preview` if topics or evidence changed. `400` `preview_required` if the token is missing. A body with only `courseId` is no longer enough |
+| POST `/api/autopilot/preview` | `{ courseId, now? }` | Contract v2. Returns `previewId` and the exact `after` rows. Day buckets stay inside today through the next exam day that is still today or later. Tasks that cannot fit are `placed: false` and are not given a date after the exam |
+| POST `/api/autopilot/confirm` | `{ previewId }` | Applies the stored rows only when the task/exam fingerprint still matches. A task added or edited after preview returns `409` and does not change dates |
 | GET `/api/misconceptions` | | hypotheses and single errors. Not a diagnosis |
 | POST `/api/misconceptions/:id/correct` | | `{ ok: true }`. Closes that evidence episode |
 | POST `/api/circles` | `{ name }` | `201 { id }` |
@@ -60,6 +60,32 @@ GET `/api/providers` returns registry rows with `liveVerified: false`, `operatio
 
 GET `/api/youtube/status` returns `configured`, `search` of `unconfigured` or `not_executed`, and `captionDownload: false`. This route does not call YouTube.
 
-## Domain behavior without an HTTP route
+## Contract version
 
-Cards, labs, games, chats, uploads, graph edits, lens decisions, device-file sync, and study-session timing exist as functions under `src/domain.ts` and related modules. They are not endpoints in this contract until a route is added to `src/server/api.ts` and a test calls it.
+Scheduling confirm is version 2. Version 1 confirm bodies that only sent `courseId` are rejected with `preview_required`. There is no automatic upgrade: the client must show the preview and send its `previewId`.
+
+`dueSemantics: "calendar_day"` means the date is a day bucket. Do not compare `dueAt` to the clock time of `now`. A bucket for today remains valid in the afternoon. A bucket after the exam day is not created.
+
+## Additional owned routes
+
+`src/server/resources.ts` handles these for the signed-in user. Another account receives 404.
+
+| Method and path | Role |
+|---|---|
+| POST `/api/decks`, POST `/api/decks/:id/cards`, GET `/api/cards`, POST `/api/cards/:id/reviews` | Decks, cards, and revealed self-ratings |
+| POST `/api/labs/projectile`, GET `/api/labs` | Deterministic projectile run |
+| POST `/api/games/built-in`, GET `/api/games` | Built-in game score labeled not mastery |
+| POST `/api/chats`, POST/GET `/api/chats/:id/messages`, PATCH/DELETE `/api/chats/:id` | Stored questions. Provider execution stays `not_executed` unless a test injects a transport; this HTTP path does not |
+| POST `/api/uploads`, GET `/api/uploads/:id` | Owner-only text or image bytes. No filesystem path in the JSON |
+| GET `/api/graph`, POST `/api/graph/nodes`, POST `/api/graph/edges` | Learner or inferred edges. Inferred is not an academically verified prerequisite |
+| POST `/api/lens` | Capability decision. `interpretation` stays null |
+| GET/POST `/api/device/notes`, POST `/api/device/notes/:id/sync` | Device copy versus server ack or conflict |
+| POST `/api/sessions`, POST `/api/sessions/:id/pause`, POST `/api/sessions/:id/complete` | Study session timing |
+
+## Responses
+
+Every JSON response sets `Cache-Control: private, no-store`. No `Access-Control-Allow-Origin` header is set. The browser is expected to call relative `/api` on the Next server (`npm run dev` or `npm start`, `127.0.0.1:3000`). `npm run serve` is the same handler on that same default port for API-only use. Do not point the Next app at a second origin.
+
+Origin checks use the `Host` header only. `X-Forwarded-Host` is ignored, so a client cannot make a foreign origin match by sending that header.
+
+Unknown thrown errors return `{ "error": "internal" }` with no message text.
