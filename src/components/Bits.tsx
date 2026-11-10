@@ -1,27 +1,94 @@
-const messages: Record<string, string> = {
-  invalid_login: "Email or password was not accepted.",
-  email_taken: "That email is already registered.",
-  invalid_email: "Enter an email address.",
-  weak_password: "Use at least 10 characters.",
-  question_out_of_scope: "That question belongs to a different course or topic.",
-  invalid_selection: "Choose one of the stored answers.",
-  invalid_answer_key: "The answer key must point at one of the choices.",
-  reveal_required: "Show the answer before you rate the card.",
-  unknown_email: "No UniBud account uses that email, so nobody was invited.",
-  not_found: "That record is not available to this account.",
-  internal: "The action could not be completed.",
-};
+"use client";
 
-export function ErrorNote({ code }: { code?: string }) {
-  if (!code) return null;
-  return <p className="alert" role="alert">{messages[code] ?? "The action could not be completed."}</p>;
+import { useEffect, useId, useRef } from "react";
+import { markedScoreLine, messageFor } from "./present.js";
+
+export function PageHeader({ kicker, title, lede }: { kicker: string; title: string; lede?: string }) {
+  return (
+    <header className="page-head">
+      <p className="kicker">{kicker}</p>
+      <h1>{title}</h1>
+      {lede ? <p className="lede">{lede}</p> : null}
+    </header>
+  );
 }
 
-export function Field({ label, name, type = "text", required = false, defaultValue = "" }: { label: string; name: string; type?: string; required?: boolean; defaultValue?: string }) {
+export function Alert({ code }: { code?: string }) {
+  if (!code) return null;
+  return <p className="alert" role="alert">{messageFor(code)}</p>;
+}
+
+export function Status({ children }: { children: React.ReactNode }) {
+  return <p className="status" role="status">{children}</p>;
+}
+
+export function Unavailable({ title, detail }: { title: string; detail: string }) {
   return (
-    <label className="field stack">
+    <section className="notice unavailable">
+      <p className="kicker">Unavailable</p>
+      <h2>{title}</h2>
+      <p>{detail}</p>
+    </section>
+  );
+}
+
+export function Loading({ label }: { label: string }) {
+  return <p className="status" role="status" aria-busy="true">{label}</p>;
+}
+
+export function Empty({ children }: { children: React.ReactNode }) {
+  return <p className="empty">{children}</p>;
+}
+
+export function Field({ label, name, type = "text", required = false, defaultValue = "", value, onChange, min, max, step }: { label: string; name: string; type?: string; required?: boolean; defaultValue?: string; value?: string; onChange?: (value: string) => void; min?: string; max?: string; step?: string }) {
+  const id = useId();
+  const controlled = value !== undefined;
+  return (
+    <label className="field stack" htmlFor={id}>
       {label}
-      {type === "area" ? <textarea name={name} required={required} defaultValue={defaultValue} rows={4} /> : <input name={name} type={type} required={required} defaultValue={defaultValue} />}
+      {type === "area" ? (
+        <textarea id={id} name={name} required={required} rows={4} {...(controlled ? { value, onChange: (event) => onChange?.(event.target.value) } : { defaultValue })} />
+      ) : (
+        <input id={id} name={name} type={type} required={required} min={min} max={max} step={step} {...(controlled ? { value, onChange: (event) => onChange?.(event.target.value) } : { defaultValue })} />
+      )}
     </label>
+  );
+}
+
+export function GameScore({ score, total, claim }: { score?: unknown; total?: unknown; claim?: string }) {
+  const line = markedScoreLine(score, total);
+  if (!line) return null;
+  return <p className="status" role="status">{line}{claim ? ` ${claim}.` : ""}</p>;
+}
+
+export function ConfirmDialog({ title, body, confirmLabel, busy, onConfirm, onClose }: { title: string; body: string; confirmLabel: string; busy?: boolean; onConfirm: () => void; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const previous = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    previous.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const node = dialog.current;
+    node?.showModal();
+    return () => {
+      node?.close();
+      previous.current?.focus();
+    };
+  }, []);
+  return (
+    <dialog ref={dialog} className="dialog" aria-labelledby="dialog-title" onCancel={(event) => { event.preventDefault(); onClose(); }}>
+      <h2 id="dialog-title">{title}</h2>
+      <p>{body}</p>
+      <div className="row">
+        <button className="btn quiet" type="button" onClick={onClose}>Cancel</button>
+        <button className="btn amber" type="button" disabled={busy} onClick={onConfirm}>{busy ? "Working…" : confirmLabel}</button>
+      </div>
+    </dialog>
+  );
+}
+
+export function Logo({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={compact ? "logo-plate compact" : "logo-plate"}>
+      <img src="/brand/unibud-primary-logo-reference.png" width={1028} height={442} alt="UniBud" />
+    </div>
   );
 }

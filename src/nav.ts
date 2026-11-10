@@ -52,6 +52,14 @@ export const groups: Array<{ id: string; label: string; href?: string; items: De
     ],
   },
   { id: "collaborate", label: "Collaborate", items: [{ href: "/circle", label: "Study Circle" }] },
+  {
+    id: "utilities",
+    label: "Utilities",
+    items: [
+      { href: "/activity", label: "Activity" },
+      { href: "/settings", label: "Profile and settings" },
+    ],
+  },
 ];
 
 export const mobileNav = [
@@ -62,6 +70,15 @@ export const mobileNav = [
   { href: "/tools", label: "Tools" },
 ];
 
+export const workspaces: Dest[] = [{ href: "/courses", label: "Courses", alias: ["course workspace"] }];
+
 export function allDestinations(): Dest[] {
-  return groups.flatMap((group) => (group.href ? [{ href: group.href, label: "Mission Control" }] : group.items));
+  return groups.flatMap((group) => (group.href ? [{ href: group.href, label: "Mission Control", alias: ["today"] }] : group.items));
+}
+
+export function searchDestinations(query: string): Dest[] {
+  const needle = query.trim().toLowerCase();
+  const items = [...allDestinations(), ...workspaces];
+  if (!needle) return items;
+  return items.filter((item) => item.label.toLowerCase().includes(needle) || item.alias?.some((alias) => alias.includes(needle)));
 }
