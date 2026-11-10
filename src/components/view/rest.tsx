@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Alert, ConfirmDialog, Empty, Field, Loading, NavyOwl, PageHeader, Status, Unavailable } from "../Bits.js";
 import { api, browserOffline, clientToken, errorCode } from "../http.js";
-import { gaps, listField, record, text } from "../present.js";
+import { gaps, listField, providerStudentStatus, record, text } from "../present.js";
 import { groups, searchDestinations } from "../../nav.js";
 import { useSearchParams } from "next/navigation";
 import { useWorkspace } from "../workspace.js";
@@ -24,8 +24,8 @@ export function TwinScreen() {
       const row = record(await api(`/api/topics/${topicId}/evidence`));
       if (!row) { setError("internal"); return; }
       const evidence = record(row.evidence);
-      const evidenceText = row.evidence === null ? "No submitted answers for this topic." : evidence ? `${evidence.correct} correct of ${evidence.total}.` : "Evidence was not the expected shape.";
-      setBody(`Self-reported level: ${text(row.selfReportedLevel) || "blank"}. ${row.selfReportIsNotMeasuredAbility === true ? "That level is not measured ability." : "The self-report flag was not returned as true."} ${evidenceText} Mastery: ${row.mastery === null ? "null" : "not returned as null"}. Demographics used: ${row.usesDemographics === false ? "no" : "not returned as false"}. Game results ignored: ${typeof row.gameResultsIgnored === "number" ? row.gameResultsIgnored : "not returned"}.`);
+      const evidenceText = row.evidence === null ? "No submitted answers for this topic yet." : evidence ? `${evidence.correct} correct of ${evidence.total}.` : "The answers could not be read.";
+      setBody(`You said your level is ${text(row.selfReportedLevel) || "not set"}. That is what you reported, not a measured score. ${evidenceText} This is not a mastery score.`);
     } catch (caught) {
       setError(errorCode(caught));
       setBody("");
@@ -36,7 +36,7 @@ export function TwinScreen() {
 
   return (
     <>
-      <PageHeader kicker="Plan" title="Learning Twin" lede="Evidence is correct answers over submitted answers for one topic. Mastery stays null. Game scores are ignored." />
+      <PageHeader kicker="Plan" title="Learning Twin" lede="This shows answers you submitted for one topic. It is not a mastery score, and game scores are left out." />
       <form className="ivory stack" onSubmit={(event) => void load(event)}>
         <label className="field stack">Topic saved in this tab
           <select value={topicId} onChange={(event) => setTopicId(event.target.value)}>
@@ -101,7 +101,7 @@ export function RadarScreen() {
       <PageHeader kicker="Plan" title="Misconception Radar" lede="A hypothesis is repeated missed attempts, not a diagnosis. A single miss is listed separately." />
       <Alert code={error} />
       {!loaded && !error ? <Loading label="Loading evidence…" /> : null}
-      <p>Diagnosis flag: {diagnosis === false ? "false" : diagnosis === true ? "true" : "not returned"}.</p>
+      <p>{diagnosis === false ? "This is not a diagnosis." : diagnosis === true ? "A diagnosis flag was returned." : "No diagnosis flag was included."}</p>
       {loaded && hypotheses.length === 0 ? <Empty title="No hypotheses">Repeated misses have not been recorded. That is empty evidence, not a clean bill of mastery.</Empty> : null}
       <ul className="plain">
         {hypotheses.map((item) => (
@@ -138,7 +138,7 @@ export function ArenaScreen() {
       if (interrupt) {
         const stopped = record(await api(`/api/attempts/${attemptId}/interrupt`, { method: "POST", body: {} }));
         const attempt = record(stopped?.attempt);
-        setNote(`Interrupted. Status ${text(attempt?.status) || "not returned"}. Score ${attempt?.score_correct === null ? "null" : "not returned as null"}.`);
+        setNote("Stopped. No score was saved.");
         return;
       }
       const marked = record(await api(`/api/attempts/${attemptId}/answers`, { method: "POST", body: { questionId: question.id, selectedIndex } }));
@@ -146,7 +146,7 @@ export function ArenaScreen() {
       if (marked?.correct === false) {
         updateMemory((current) => ({ ...current, missed: [...current.missed.filter((item) => item.questionId !== question.id), { questionId: question.id, prompt: question.prompt, courseId: question.courseId, topicId: question.topicId }] }));
       }
-      setNote(`Submitted. Objective key ${marked?.correct === true ? "matched" : "did not match"}. ${gaps.attempts}`);
+      setNote(`${marked?.correct === true ? "That matched the answer you stored." : "That didn't match the answer you stored."} ${gaps.attempts}`);
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -156,7 +156,7 @@ export function ArenaScreen() {
 
   return (
     <>
-      <PageHeader kicker="Exams" title="Exam Arena" lede="Interrupting an attempt stores no score. Questions are the ones you saved in this browser, because the server does not list them." />
+      <PageHeader kicker="Exams" title="Exam Arena" lede="Stopping early saves no score. The questions here are the ones you wrote during this visit." />
       <Alert code={error} />
       {memory.questions.length === 0 ? <Empty title="No question to sit">Add a practice question before an arena attempt.</Empty> : (
         <form className="reading stack" onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void submit(false, Number(data.get("selected"))); }}>
@@ -199,7 +199,7 @@ export function CircleScreen() {
       updateMemory((current) => ({ ...current, circles: [...current.circles.filter((item) => item.id !== saved.id), saved] }));
       setCircleId(saved.id);
       setName("");
-      setNote("Circle created. Membership is not listed. You are the owner on the server.");
+      setNote("Circle created. You can invite someone who already has an account.");
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -240,7 +240,7 @@ export function CircleScreen() {
     try {
       const body = record(await api(`/api/circles/${circleId}/posts`, { method: "POST", body: { body: post } }));
       const audience = Array.isArray(body?.audience) ? body.audience.length : 0;
-      setNote(`Posted. Ack ${body?.ack === true ? "true" : "not returned"}. Active audience count ${audience}.`);
+      setNote(body?.ack === true ? `Posted to ${audience} active member${audience === 1 ? "" : "s"}.` : "The post was not confirmed.");
       setPost("");
       await refresh();
     } catch (caught) {
@@ -289,7 +289,7 @@ export function CircleScreen() {
         <button className="btn amber" type="submit" disabled={busy || !circleId}>Post to active members</button>
       </form>
       <button className="btn quiet" type="button" disabled={!circleId} onClick={() => void refresh()}>Load posts</button>
-      {posts.length === 0 ? <p className="meta">No posts loaded.</p> : <ul className="plain">{posts.map((item) => <li key={item.id}>{item.body} · ack {item.ack || "not returned"}</li>)}</ul>}
+      {posts.length === 0 ? <p className="meta">No posts yet.</p> : <ul className="plain">{posts.map((item) => <li key={item.id}>{item.body}</li>)}</ul>}
       {note ? <Status>{note}</Status> : null}
     </>
   );
@@ -298,7 +298,7 @@ export function CircleScreen() {
 export function ActivityScreen() {
   return (
     <>
-      <PageHeader kicker="Utilities" title="Notifications and Activity" lede="Activity would list real account events. This server does not expose that list." />
+      <PageHeader kicker="Utilities" title="Notifications and Activity" lede="Updates about your study would show up here." />
       <Unavailable title="No activity feed" detail={gaps.notifications} />
     </>
   );
@@ -306,7 +306,7 @@ export function ActivityScreen() {
 
 export function SettingsScreen() {
   const { me } = useWorkspace();
-  const [providers, setProviders] = useState<string>("");
+  const [providers, setProviders] = useState<Array<{ provider: string; model: string; configured: boolean; blockReason: string }> | null>(null);
   const [error, setError] = useState("");
   const [exportText, setExportText] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -314,12 +314,11 @@ export function SettingsScreen() {
 
   useEffect(() => {
     api("/api/providers").then((body) => {
-      const lines = listField(body, "providers").flatMap((item) => {
+      setProviders(listField(body, "providers").flatMap((item) => {
         const row = record(item);
         if (!row || typeof row.provider !== "string") return [];
-        return [`${row.provider} ${text(row.model)}: ${row.configured === true ? "configured" : "unconfigured"}, eligible false, operational false, live verified false${typeof row.blockReason === "string" ? `, ${row.blockReason}` : ""}`];
-      });
-      setProviders(lines.join("\n"));
+        return [{ provider: row.provider, model: text(row.model), configured: row.configured === true, blockReason: typeof row.blockReason === "string" ? row.blockReason : "" }];
+      }));
     }).catch((caught: unknown) => setError(errorCode(caught)));
   }, []);
 
@@ -349,17 +348,26 @@ export function SettingsScreen() {
 
   return (
     <>
-      <PageHeader kicker="Utilities" title="Profile and settings" lede="AI intelligence settings show the provider registry. None are marked ready." />
+      <PageHeader kicker="Utilities" title="Profile and settings" lede="Models that aren't set up stay listed so you can see them. None of them are ready to answer." />
       <NavyOwl alt="UniBud navy owl" />
       <p className="meta">{gaps.profile}</p>
       <dl className="facts">
         <div><dt>Email</dt><dd>{me.email}</dd></div>
-        <div><dt>Account id</dt><dd>{me.id}</dd></div>
-        <div><dt>Data class</dt><dd>{me.dataClass || "unknown"}</dd></div>
       </dl>
-      <h2>AI intelligence settings</h2>
+      <h2>AI settings</h2>
       <Alert code={error} />
-      {providers ? <pre className="export">{providers}</pre> : <Loading label="Loading providers…" />}
+      {providers === null && !error ? <Loading label="Loading models…" /> : null}
+      {providers && providers.length > 0 ? (
+        <ul className="plain">
+          {providers.map((provider) => (
+            <li key={`${provider.provider}:${provider.model}`}>
+              <p><strong>{provider.provider}</strong> · {provider.model}</p>
+              <p>{providerStudentStatus(provider.provider, provider.configured)}</p>
+              <details><summary>AI info</summary><p>{provider.blockReason || "No extra detail was returned."}</p></details>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className="row">
         <button className="btn quiet" type="button" disabled={busy} onClick={() => void download()}>Download account export</button>
         <button className="btn quiet" type="button" onClick={() => setConfirming(true)}>Delete account</button>
@@ -394,7 +402,7 @@ export function SearchScreen() {
   const matches = searchDestinations(query);
   return (
     <>
-      <PageHeader kicker="Search" title={query ? `Results for “${query}”` : "Search tools"} lede="Search matches tool names. It does not search notes, because note bodies are not listed." />
+      <PageHeader kicker="Search" title={query ? `Results for “${query}”` : "Search tools"} lede="This finds tools by name. It doesn't search the text of your notes." />
       <form className="search" action="/search" role="search">
         <label className="sr" htmlFor="search-q">Search tools</label>
         <input id="search-q" name="q" defaultValue={query} />

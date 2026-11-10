@@ -45,7 +45,7 @@ const faultCopy: Record<PreviewFault, { http: string; title: string; body: strin
   stale_preview: {
     http: "409",
     title: "This preview is stale",
-    body: "Records changed after this proposal was issued. The server refused it. Nothing was applied. Request a new preview and review it before confirming.",
+    body: "Your courses changed after this proposal. Nothing was saved. Ask for a new proposal and read it before confirming.",
   },
 };
 
@@ -76,7 +76,7 @@ export function StateNote({ code, title, children }: { code: string; title?: str
 export function Empty({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="state state-empty">
-      <p className="kicker">Empty</p>
+      <p className="kicker">Nothing here</p>
       <h2>{title}</h2>
       <p>{children}</p>
     </section>

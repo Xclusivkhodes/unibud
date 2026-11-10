@@ -25,7 +25,9 @@ export function LoginForm({ initialError = "" }: { initialError?: string }) {
   }
 
   return (
-    <main className="auth stack">
+    <>
+    <a className="skip" href="#content">Skip to content</a>
+    <main id="content" className="auth stack">
       <Logo />
       <h1 className="hero">Sign in</h1>
       <p className="lede">Study Companion keeps courses, notes, and practice on this account.</p>
@@ -37,6 +39,7 @@ export function LoginForm({ initialError = "" }: { initialError?: string }) {
       </form>
       <Link href="/register">Create an account</Link>
     </main>
+    </>
   );
 }
 
@@ -61,7 +64,9 @@ export function RegisterForm({ deleted = false, initialError = "" }: { deleted?:
   }
 
   return (
-    <main className="auth stack">
+    <>
+    <a className="skip" href="#content">Skip to content</a>
+    <main id="content" className="auth stack">
       <Logo />
       <h1 className="hero">Create your workspace</h1>
       <p className="lede">A preferred name is optional. If you send one, it is stored, but the session response does not return it. The workspace shows your email.</p>
@@ -75,5 +80,6 @@ export function RegisterForm({ deleted = false, initialError = "" }: { deleted?:
       </form>
       <Link href="/login">Already registered</Link>
     </main>
+    </>
   );
 }

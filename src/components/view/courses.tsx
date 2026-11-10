@@ -114,7 +114,7 @@ export function CourseScreen({ courseId }: { courseId: string }) {
       if (topic) updateMemory((current) => ({ ...current, topics: [...current.topics.filter((item) => item.id !== topic.id), topic] }));
       setTopicName("");
       setLevel("");
-      setNote(topic ? "Topic saved. The server does not list topics after this response." : "The server did not return a topic row.");
+      setNote(topic ? "Topic saved. It stays on this page for this visit." : "The topic wasn't saved.");
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -133,7 +133,7 @@ export function CourseScreen({ courseId }: { courseId: string }) {
       setSourceBody("");
       const listed = await api(`/api/sources?courseId=${encodeURIComponent(courseId)}`);
       setSources(listField(listed, "sources").flatMap((item) => { const source = readSource(item); return source ? [source] : []; }));
-      setNote("Source saved. The list shows the title the server returned, not the body.");
+      setNote("Note saved. The list shows the title.");
     } catch (caught) {
       setError(errorCode(caught));
     } finally {

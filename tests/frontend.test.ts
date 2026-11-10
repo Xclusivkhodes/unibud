@@ -46,6 +46,8 @@ test("glass text meets the reading contrast floor", () => {
   expect(contrastRatio(tokens.ink, tokens.amber)).toBeGreaterThanOrEqual(4.5);
   expect(contrastRatio(tokens.teal, tokens.ivory)).toBeGreaterThanOrEqual(4.5);
   expect(contrastRatio(tokens.amber, tokens.navy)).toBeGreaterThanOrEqual(3);
+  expect(contrastRatio("#526174", tokens.ivory)).toBeGreaterThanOrEqual(4.5);
+  expect(contrastRatio(tokens.ink, tokens.ivory)).toBeGreaterThanOrEqual(4.5);
 });
 
 test("navigation keeps Study Companion and the five mobile labels", () => {

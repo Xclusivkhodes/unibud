@@ -56,7 +56,7 @@ export function CramScreen() {
     try {
       const body = record(await api("/api/cram/confirm", { method: "POST", body: confirmPayload(preview.previewId) }));
       const taskIds = Array.isArray(body?.taskIds) ? body.taskIds.filter((item) => typeof item === "string") : [];
-      setAppliedNote(`Confirmed. Exam id ${typeof body?.examId === "string" ? body.examId : "was not returned"}. Tasks created: ${taskIds.length}. ${body?.insufficientTime === true ? "The budget was labeled insufficient. This does not predict the paper." : "Insufficient time was not flagged."}`);
+      setAppliedNote(`Saved. ${taskIds.length} task${taskIds.length === 1 ? "" : "s"} added. ${body?.insufficientTime === true ? "There isn't enough time in the hours you entered. This doesn't predict the paper." : "The hours you entered cover the suggested time."}`);
       setPhase("applied");
     } catch (caught) {
       const code = errorCode(caught);
@@ -78,7 +78,7 @@ export function CramScreen() {
       const topic = readTopic(record(body)?.topic);
       if (topic) updateMemory((current) => ({ ...current, topics: [...current.topics.filter((item) => item.id !== topic.id), topic] }));
       setTopicName("");
-      setAppliedNote("Topic saved. If a preview is already on screen, confirming it should return stale_preview because the topic list changed. Request a new preview to include it.");
+      setAppliedNote("Topic saved. If a proposal is already on screen, confirming it should be refused and nothing is saved. Ask for a new proposal to include this topic.");
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -88,7 +88,7 @@ export function CramScreen() {
 
   return (
     <>
-      <PageHeader kicker="Exams" title="Exam Cram Sprint" lede="Minutes come from the hours you enter and are dated between today and the exam as calendar-day buckets, not appointments. A short budget is labeled insufficient. It does not predict the paper." />
+      <PageHeader kicker="Exams" title="Exam Cram Sprint" lede="The hours you enter are spread across the days from today to the exam. A short budget is labeled as not enough time. It doesn't predict the paper." />
       <form className="ivory stack" onSubmit={(event) => void requestPreview(event)}>
         <label className="field stack">Course
           <select name="courseId" required value={courseId} onChange={(event) => setCourseId(event.target.value)}>
@@ -102,19 +102,19 @@ export function CramScreen() {
         <Field label="Syllabus notes" name="syllabus" type="area" value={syllabus} onChange={setSyllabus} />
         <button className="btn amber" type="submit" disabled={busy}>{busy && phase === "pending" ? "Preparing preview…" : "Preview proposal"}</button>
       </form>
-      {shown === "stale" ? <section className="state state-stale"><p className="kicker">Form changed</p><h2>Review a new preview</h2><p>The form changed after this proposal. Confirmation stays off until you request a preview of the current form. This is not the server stale_preview response.</p></section> : null}
+      {shown === "stale" ? <section className="state state-stale"><p className="kicker">Changed</p><h2>Look at a new proposal</h2><p>You changed the form. Ask for a new proposal before confirming.</p></section> : null}
       {shown === "offline" ? <Alert code="offline" /> : null}
       <PreviewFaultNote code={error} />
       <Alert code={error} />
       {preview ? (
         <section className="glass stack" aria-live="polite">
           <h2>Proposal</h2>
-          <p>{preview.title || "Untitled exam"} · {preview.examDate || "No exam date returned"} · due semantics {preview.dueSemantics || "not returned"}.</p>
-          <p>Window {preview.windowStart ?? "none"} to {preview.windowEnd ?? "none"}. Suggested minutes {preview.suggestedMinutes ?? "not returned"}. Needed minutes {preview.neededMinutes ?? "not returned"}.</p>
+          <p>{preview.title || "Untitled exam"} · {preview.examDate || "No exam date"}.</p>
+          <p>From {preview.windowStart ?? "today"} to {preview.windowEnd ?? "the exam"}. Suggested {preview.suggestedMinutes ?? "—"} minutes. The plan uses about {preview.neededMinutes ?? "—"} minutes.</p>
           {preview.insufficientTime ? <p>Insufficient time: the stated hours are below the planner’s topic budget, or the exam day is not in the window. This is not a prediction.</p> : <p>Insufficient time was not flagged.</p>}
           {preview.impossible ? <p>Impossible: there is no calendar day from today through the exam day.</p> : null}
-          <p>Predicts future questions: {preview.predictsFutureQuestions === null ? "not returned" : preview.predictsFutureQuestions ? "yes" : "no"}.</p>
-          {preview.priorities.length === 0 ? <Empty title="No topic priorities">This course has no topics, so the proposal schedules nothing. Confirming still saves the exam and creates no revision tasks.</Empty> : (
+          <p>{preview.predictsFutureQuestions ? "This proposal guesses future questions." : "This proposal does not guess future questions."}</p>
+          {preview.priorities.length === 0 ? <Empty title="No topics yet">Add a topic if you want revision tasks. Confirming still saves the exam date.</Empty> : (
             <table>
               <caption>Proposed priorities from your topics. Accuracy is recorded attempts, or blank when there are none.</caption>
               <thead><tr><th>Topic</th><th>Minutes</th><th>Day bucket</th><th>Reason</th></tr></thead>
@@ -131,14 +131,14 @@ export function CramScreen() {
             </table>
           )}
           <button className="btn amber" type="button" disabled={busy || shown !== "review" && shown !== "error"} onClick={() => void confirm()}>Confirm this preview</button>
-          <p className="meta">Confirm sends only the preview id. It does not resend the form.</p>
+          <p className="meta">Confirm uses the proposal on screen. It does not send the form again.</p>
         </section>
       ) : null}
       {shown === "applied" && appliedNote ? <Status>{appliedNote}</Status> : null}
       {appliedNote && shown !== "applied" ? <Status>{appliedNote}</Status> : null}
       <form className="stack" onSubmit={(event) => void addTopic(event)}>
         <h2>Add a topic after preview</h2>
-        <p className="lede">Adding a topic changes the records a cram preview was based on. Confirming the preview already on screen then returns stale_preview and writes nothing.</p>
+        <p className="lede">If you add a topic after a proposal is on screen, confirming that proposal should be refused and nothing is saved. Ask for a new proposal to include the topic.</p>
         <Field label="Topic name" name="topicName" required value={topicName} onChange={setTopicName} />
         <button className="btn quiet" type="submit" disabled={busy || !courseId}>Save topic</button>
       </form>
@@ -192,7 +192,7 @@ export function AutopilotScreen() {
         return;
       }
       setPhase("applied");
-      setNote(`Applied. Updated rows: ${typeof body?.updated === "number" ? body.updated : "not returned"}. Due semantics ${typeof body?.dueSemantics === "string" ? body.dueSemantics : "not returned"}.`);
+      setNote(`Saved. ${typeof body?.updated === "number" ? body.updated : "Some"} dates updated. Each date is a whole day, not a clock time.`);
     } catch (caught) {
       const code = errorCode(caught);
       setError(code);
@@ -210,7 +210,7 @@ export function AutopilotScreen() {
     try {
       const task = readTask(record(await api("/api/tasks", { method: "POST", body: { title: taskTitle, courseId, confirmed: true } }))?.task);
       setTaskTitle("");
-      setNote(task ? "Task saved. Confirming a preview issued before this task should return stale_preview and leave dates unchanged." : "The server did not return a task row.");
+      setNote(task ? "Task saved. Confirming a proposal from before this task should be refused, and the dates stay as they are." : "The task was not saved.");
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -220,7 +220,7 @@ export function AutopilotScreen() {
 
   return (
     <>
-      <PageHeader kicker="Plan" title="Academic Autopilot" lede="A proposal shows the open tasks before and after. Nothing moves until you confirm that preview. Tasks that cannot fit stay unplaced and are not given a date after the exam." />
+      <PageHeader kicker="Plan" title="Academic Autopilot" lede="You'll see your tasks before and after. Nothing moves until you confirm. A task that doesn't fit stays undated, and it won't be placed after the exam." />
       <label className="field stack">Course
         <select name="courseId" required value={courseId} onChange={(event) => setCourseId(event.target.value)}>
           <option value="">Select a course</option>
@@ -228,20 +228,20 @@ export function AutopilotScreen() {
         </select>
       </label>
       <button className="btn amber" type="button" disabled={busy || !courseId} onClick={() => void requestPreview()}>{busy && phase === "pending" ? "Preparing preview…" : "Preview proposal"}</button>
-      {shown === "stale" ? <section className="state state-stale"><p className="kicker">Form changed</p><h2>The course changed</h2><p>Request a preview for the course now selected. Confirmation of the previous proposal stays off.</p></section> : null}
+      {shown === "stale" ? <section className="state state-stale"><p className="kicker">Changed</p><h2>The course changed</h2><p>Ask for a proposal for the course you selected now.</p></section> : null}
       {shown === "offline" ? <Alert code="offline" /> : null}
-      {shown === "conflict" ? <section className="state state-denied" role="alert"><p className="kicker">conflict · 409</p><h2>Dates were not changed</h2><p>The server found a revision conflict and did not overwrite the newer task. Request a new preview.</p></section> : null}
+      {shown === "conflict" ? <section className="state state-denied" role="alert"><p className="kicker">Needs another look</p><h2>Dates were not changed</h2><p>A newer copy of a task exists. Ask for a new proposal.</p></section> : null}
       <PreviewFaultNote code={error} />
       <Alert code={error === "conflict" ? "" : error} />
       {preview ? (
         <section className="glass stack">
           <h2>Proposal</h2>
-          <p>Due semantics {preview.dueSemantics || "not returned"}. Window {preview.windowStart ?? "none"} to {preview.windowEnd ?? "none"}.</p>
+          <p>Dates are whole days, not clock times. From {preview.windowStart ?? "today"} to {preview.windowEnd ?? "the exam"}.</p>
           {preview.impossible ? <p>At least one open task could not be placed inside the window.</p> : <p>Every returned row was placed, or there were no open tasks.</p>}
           {preview.conflicts.length > 0 ? <p>Outside the previous window: {preview.conflicts.join(", ")}.</p> : <p>No outside-window conflicts were returned.</p>}
-          {preview.after.length === 0 ? <Empty title="No open tasks">Autopilot has nothing to date for this course. Add a confirmed task, then request a new preview.</Empty> : (
+          {preview.after.length === 0 ? <Empty title="No open tasks">Add a confirmed task, then ask for a new proposal.</Empty> : (
             <table>
-              <caption>Before and after day buckets. Changed rows are proposals until you confirm.</caption>
+              <caption>Before and after. Nothing moves until you confirm.</caption>
               <thead><tr><th>Task</th><th>Before</th><th>After</th><th>Placed</th></tr></thead>
               <tbody>
                 {preview.after.map((row) => {

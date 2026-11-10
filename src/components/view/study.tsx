@@ -47,7 +47,7 @@ export function PracticeScreen() {
       setPrompt("");
       setChoiceA("");
       setChoiceB("");
-      setResult("Question saved. The server returned an id only. The prompt below is the text you typed.");
+      setResult("Question saved. The wording below is what you typed.");
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -75,7 +75,7 @@ export function PracticeScreen() {
           missed: [...current.missed.filter((item) => item.questionId !== questionId), { questionId, prompt: question.prompt, courseId: question.courseId, topicId: question.topicId }],
         }));
       }
-      setResult(`Objective key: ${correct ? "matched" : "did not match"}. Submitted score ${typeof attempt?.score_correct === "number" ? attempt.score_correct : "not returned"} / ${typeof attempt?.score_total === "number" ? attempt.score_total : "not returned"}. ${gaps.attempts}`);
+      setResult(`${correct ? "That matched the answer you stored." : "That didn't match the answer you stored."} ${typeof attempt?.score_correct === "number" && typeof attempt?.score_total === "number" ? `Score ${attempt.score_correct} of ${attempt.score_total}.` : ""} ${gaps.attempts}`);
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -161,7 +161,7 @@ export function CardsScreen() {
         updateMemory((current) => ({ ...current, decks: [...current.decks.filter((item) => item.id !== saved.id), saved] }));
         setDeckId(saved.id);
         setTitle("");
-        setNote("Deck saved. Decks are not listed by the server, so this title stays in this browser tab.");
+        setNote("Deck saved. It stays on this page for this visit.");
       }
     } catch (caught) {
       setError(errorCode(caught));
@@ -192,7 +192,7 @@ export function CardsScreen() {
     setBusy(true);
     try {
       const body = record(await api(`/api/cards/${cardId}/reviews`, { method: "POST", body: { quality: Number(quality), revealed: true, scoringMethod: "self_rated", idempotencyKey: clientToken() } }));
-      setNote(`Self-rated recall. Scheduler ${typeof body?.scheduler === "string" ? body.scheduler : "not returned"}. Next due ${typeof body?.dueAt === "string" ? body.dueAt : "not returned"}. Mastery ${body?.mastery === null ? "null" : "not returned as null"}.`);
+      setNote(`Self-rated, not a marked score. Next due ${typeof body?.dueAt === "string" ? body.dueAt : "not given"}. This is not mastery.`);
       await load();
     } catch (caught) {
       setError(errorCode(caught));
@@ -264,7 +264,7 @@ export function StressScreen() {
   const { memory } = useWorkspace();
   return (
     <>
-      <PageHeader kicker="Practice" title="Knowledge Stress Test" lede="This is not a validated psychometric measure. Missed prompts are not listed by the server." />
+      <PageHeader kicker="Practice" title="Knowledge Stress Test" lede="This is not a formal test. Questions you missed in this visit can be tried again from Practice." />
       <p className="meta">A question you answered incorrectly in this browser tab can be retried from Practice. Hypotheses with repeated misses are on Misconception Radar.</p>
       {memory.missed.length === 0 ? <Empty title="No missed questions in this tab">Answer a practice question first. A wrong mark is kept only in this browser, beside the prompt you typed.</Empty> : (
         <ul className="plain">{memory.missed.map((item) => <li key={item.questionId}>{item.prompt}</li>)}</ul>
@@ -312,7 +312,7 @@ export function PlannerScreen() {
 
   return (
     <>
-      <PageHeader kicker="Plan" title="Study Planner" lede="The agenda is the list the server returns. There is no drag-and-drop, and completion is not an HTTP route." />
+      <PageHeader kicker="Plan" title="Study Planner" lede="Your confirmed tasks are listed here. You can add one without dragging. Marking a task done isn't available yet." />
       <Alert code={error} />
       <p className="meta">{gaps.taskComplete}</p>
       <form className="ivory stack" onSubmit={(event) => void add(event)}>

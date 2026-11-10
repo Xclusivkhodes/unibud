@@ -26,10 +26,10 @@ const messages: Record<string, string> = {
   invalid_quality: "Use a whole-number self-rating from 0 to 5.",
   not_found: "That record is not available to this account.",
   preview_required: "Confirmation needs the preview identifier from the proposal you are looking at.",
-  stale_preview: "That preview is stale. Records changed after it was issued. Nothing was applied.",
+  stale_preview: "That proposal is out of date. Your courses changed, and nothing was saved.",
   preview_consumed: "That preview was already used. Request a new proposal. Nothing new was applied.",
   preview_not_found: "That preview is not on this account. Nothing was applied.",
-  conflict: "The server reported a conflict and did not change the stored dates.",
+  conflict: "A newer copy exists, so the dates were not changed.",
   csrf_required: "The safety header was missing, so nothing was saved.",
   csrf_origin: "The request origin was rejected, so nothing was saved.",
   unauthenticated: "Sign in to continue.",
@@ -336,7 +336,7 @@ export function calendarDayDecision(day: string, todayUtc: string): "empty" | "i
 export function calendarBucketLabel(dueAt: string | null): string {
   if (!dueAt) return "No day bucket";
   const day = dueAt.slice(0, 10);
-  if (dueAt.endsWith("T00:00:00.000Z")) return `${day} calendar day, not an appointment`;
+  if (dueAt.endsWith("T00:00:00.000Z")) return `${day}, a whole day rather than a clock time`;
   return dueAt;
 }
 
@@ -398,20 +398,29 @@ export function parseMemory(raw: string | null): BrowserMemory {
 
 export const BUILT_IN_PROMPTS = ["Range formula name", "Negative log10 of strong-acid concentration"] as const;
 
+const paidProviders = new Set(["openai", "anthropic", "xai"]);
+
+/** Student label from the API `configured` flag. Paid providers stay "Not set up". */
+export function providerStudentStatus(provider: string, configured: boolean): "Not set up" | "Not available yet: this model isn't set up" {
+  if (paidProviders.has(provider) || !configured) return "Not set up";
+  return "Not available yet: this model isn't set up";
+}
+
 export const gaps = {
-  explanations: "Saving an explanation needs an artifact route. None is in the current API, so this page does not store one.",
-  packs: "Study packs need a compiler route. None is in the current API, so nothing is composed.",
-  notifications: "Notifications are not listed. There is no activity endpoint, so unread counts are not shown.",
-  profile: "GET /api/me returns id, email, and data class. Preferred name, timezone, and AI preference fields are not returned, and there is no profile update route.",
-  exams: "Exam rows are not listed. A cram confirmation can create tasks you can read on the planner. The exam title itself is not returned by a list.",
-  attempts: "Submitted attempts are not listed. A result appears only for the attempt you just submitted.",
-  questions: "Saved questions are not listed. The prompt below is the text you typed next to the id the server returned.",
-  topics: "Topics are not listed by the server. A topic stays in this browser tab only from the response returned when you added it.",
-  chats: "Chats are not listed. A conversation stays in this browser tab only from the id returned when you opened it. Messages for that id can be reloaded.",
-  circles: "Circle membership is not listed. A circle stays in this browser tab only from the id returned when you created it.",
-  taskComplete: "Marking a task done is not an HTTP route, so completion is unavailable.",
-  bookmarks: "Saving a video reference is not an HTTP route. YouTube search is not executed by the status route.",
-  otherLabs: "Only projectile motion has a route. Strong-acid pH, Punnett, bubble sort, and sine are not run from this page.",
-  streak: "Streak and lifetime study minutes are not listed. Minutes appear only for a session you complete in this view.",
-  sourceBody: "The source list returns titles and ids, not the note body.",
+  explanations: "Saving an explanation isn't available yet.",
+  packs: "Study packs aren't available yet.",
+  notifications: "You don't have any notifications yet.",
+  profile: "Your email is shown here. Name, timezone, and AI choices can't be changed yet.",
+  exams: "Your upcoming exams will appear here.",
+  attempts: "Your marked answers show up after you submit a question.",
+  questions: "Questions you write during this visit stay here, in the words you typed.",
+  topics: "Topics you add during this visit stay on this page.",
+  chats: "Conversations you open during this visit stay here. You can reload their messages.",
+  circles: "Circles you create during this visit stay here.",
+  taskComplete: "Marking a task done isn't available yet.",
+  bookmarks: "Saved videos aren't available yet.",
+  otherLabs: "This page runs projectile motion. The other labs aren't available yet.",
+  streak: "A streak isn't shown. Minutes appear after you finish a session on this page.",
+  sourceBody: "Notes are listed by title.",
+  videoCreation: "Video creation isn't set up. UniBud doesn't make paid video. A video here would be a YouTube embed, slides you can read, or speech in your browser.",
 } as const;

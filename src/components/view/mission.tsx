@@ -60,7 +60,7 @@ export function TodayScreen() {
         const id = body.id;
         updateMemory((current) => ({ ...current, sessionId: id }));
         setSessionNote("A study session is open. Minutes are recorded only after you complete it.");
-      } else setSessionNote("The server did not return a session id.");
+      } else setSessionNote("The session didn't start.");
     } catch (caught) {
       setSessionNote(errorCode(caught));
     } finally {
@@ -101,7 +101,7 @@ export function TodayScreen() {
           {selected ? (
             <>
               <h2>Continue {selected.name}</h2>
-              <p>{selected.goal || "No goal text was saved on this course."} {gaps.streak}</p>
+              <p>{selected.goal || "No goal saved yet."} {gaps.streak}</p>
               <div className="row">
                 <span className="chip">{selected.name}</span>
                 <Link className="btn amber" href={`/courses/${selected.id}`}>Open course</Link>
@@ -110,7 +110,7 @@ export function TodayScreen() {
           ) : coursesStatus === "ready" ? (
             <>
               <h2>Add a course</h2>
-              <p>The resume panel stays empty until you save a course. No sample subject is shown.</p>
+              <p>Add a course to pick up where you left off.</p>
               <form className="stack" onSubmit={(event) => void saveCourse(event)}>
                 <Field label="Course name" name="name" required value={name} onChange={setName} />
                 <Field label="Goal, optional" name="goal" value={goal} onChange={setGoal} />
@@ -123,12 +123,12 @@ export function TodayScreen() {
         <aside className="stack">
           <section className="glass stack">
             <h2>Next up</h2>
-            {next ? <p>{next.title}. {calendarBucketLabel(next.dueAt)}. This is a task, not an exam record.</p> : <p>{gaps.exams}</p>}
+            {next ? <p>{next.title}. {calendarBucketLabel(next.dueAt)}.</p> : <p>{gaps.exams}</p>}
             <Link href="/cram">Review an exam proposal</Link>
           </section>
           <section className="glass ask stack">
             <h2>Ask a question</h2>
-            <p>Lessons, notes, and practice stay on this account. A model reply appears only when a provider actually returns one.</p>
+            <p>Ask about your course. A reply appears only when a model actually answers.</p>
             <Link className="btn amber" href="/companion">Open Study Companion</Link>
           </section>
         </aside>
@@ -137,7 +137,7 @@ export function TodayScreen() {
         <h2>Learning agenda</h2>
         <Link href="/planner">View plan</Link>
       </div>
-      {tasks && agenda.length === 0 ? <Empty title="No open tasks">Tasks you confirm appear here. An empty agenda is not a failed load.</Empty> : null}
+      {tasks && agenda.length === 0 ? <Empty title="No tasks yet">Confirmed tasks show up here.</Empty> : null}
       {agenda.length > 0 ? (
         <ol className="agenda">
           {agenda.map((task, index) => (

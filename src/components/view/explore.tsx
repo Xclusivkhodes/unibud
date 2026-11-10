@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Alert, Empty, Field, Loading, PageHeader, Status, Unavailable } from "../Bits.js";
+import { Alert, Empty, Field, Loading, PageHeader, Status } from "../Bits.js";
 import { api, browserOffline, clientToken, errorCode } from "../http.js";
-import { gaps, listField, record, text } from "../present.js";
+import { gaps, listField, providerStudentStatus, record, text } from "../present.js";
 import type { ProviderPublicStatus, YoutubePublicStatus } from "../../contract/types.js";
 import { useWorkspace } from "../workspace.js";
 
@@ -34,7 +34,7 @@ export function LabScreen() {
     try {
       const body = record(await api("/api/labs/projectile", { method: "POST", body: { speed: Number(speed), degrees: Number(degrees), courseId: courseId || undefined, idempotencyKey: clientToken() } }));
       const range = record(body?.result);
-      setResult(`Range ${typeof range?.rangeMeters === "number" ? range.rangeMeters : "not returned"} m. ${text(body?.assumptions)} Units ${text(body?.units)}. Timed appointment: ${body?.timedAppointment === false ? "no" : "not returned as false"}.`);
+      setResult(typeof range?.rangeMeters === "number" ? `Range ${range.rangeMeters} m. ${text(body?.assumptions)}` : "The run didn't return a range.");
       const listed = await api("/api/labs");
       setRuns(listField(listed, "runs").flatMap((item) => {
         const row = record(item);
@@ -65,7 +65,7 @@ export function LabScreen() {
         </table>
       ) : null}
       {runs === null && !error ? <Loading label="Loading saved runs…" /> : null}
-      {runs && runs.length === 0 ? <Empty title="No saved runs">A run appears here after the server stores one. The list includes the lab name and assumptions, not the range.</Empty> : null}
+      {runs && runs.length === 0 ? <Empty title="No saved runs">A run shows up here after you calculate one. Older runs list the lab and its assumptions.</Empty> : null}
       {runs && runs.length > 0 ? <ul className="plain">{runs.map((runItem) => <li key={runItem.id}>{runItem.lab || "Unnamed lab"} · {runItem.assumptions || "No assumptions returned"}</li>)}</ul> : null}
     </>
   );
@@ -85,7 +85,7 @@ export function LensScreen() {
     try {
       const body = record(await api("/api/lens", { method: "POST", body: { mode, consent } }));
       const status = text(body?.status) || "not returned";
-      setNote(`Status ${status}. Image analysis ${body?.imageAnalysis === false ? "false" : "not returned as false"}. Interpretation ${body?.interpretation === null ? "null" : "not returned as null"}. Reason ${text(body?.reason) || "not returned"}.`);
+      setNote(status === "denied" ? "Image exploration isn't available. You can still describe the idea in text." : status === "text_only" ? "Text was accepted. This is not an image analysis." : "No image reading was produced.");
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -172,9 +172,9 @@ export function UniverseScreen() {
     <>
       <PageHeader kicker="Explore" title="Knowledge Universe" lede="Concepts are a list you can edit. An inferred edge is not an academically verified prerequisite." />
       <Alert code={error} />
-      {loaded && nodes.length === 0 ? <Empty title="No concepts">Add a label to start the list. An empty graph is not a failed load.</Empty> : null}
+      {loaded && nodes.length === 0 ? <Empty title="No concepts yet">Add a name to start your list.</Empty> : null}
       <ul className="plain">{nodes.map((node) => <li key={node.id}>{node.label || "Untitled"} · {node.id}{node.topicId ? ` · topic ${node.topicId}` : ""}</li>)}</ul>
-      <ul className="plain">{edges.map((edge) => <li key={edge.id}>{edge.from} → {edge.to} · {edge.origin || "origin not returned"} · {edge.verification || "verification not returned"}</li>)}</ul>
+      <ul className="plain">{edges.map((edge) => <li key={edge.id}>{edge.from} → {edge.to} · {edge.origin === "inferred" ? "Suggested by you as a guess" : "Added by you"} · {edge.verification === "not_verified" || !edge.verification ? "Not an academically checked link" : edge.verification}</li>)}</ul>
       <form className="ivory stack" onSubmit={(event) => void addNode(event)}>
         <h2>Add a concept</h2>
         <Field label="Label" name="label" required value={label} onChange={setLabel} />
@@ -206,6 +206,7 @@ export function ResourcesScreen() {
   const [youtube, setYoutube] = useState<YoutubePublicStatus | null>(null);
   const [providers, setProviders] = useState<ProviderPublicStatus[] | null>(null);
   const [error, setError] = useState("");
+  const [checked, setChecked] = useState(false);
 
   useEffect(() => {
     Promise.all([api("/api/youtube/status"), api("/api/providers")]).then(([videoBody, providerBody]) => {
@@ -213,6 +214,7 @@ export function ResourcesScreen() {
       if (video && (video.search === "unconfigured" || video.search === "not_executed") && video.captionDownload === false) {
         setYoutube({ configured: video.configured === true, search: video.search, captionDownload: false, captionReason: text(video.captionReason) });
       }
+      setChecked(true);
       setProviders(listField(providerBody, "providers").flatMap((item) => {
         const row = record(item);
         if (!row || typeof row.provider !== "string" || typeof row.model !== "string") return [];
@@ -223,18 +225,38 @@ export function ResourcesScreen() {
 
   return (
     <>
-      <PageHeader kicker="Explore" title="Resource Discovery" lede="YouTube search is a status check only. No titles, channels, or durations are shown because none were returned." />
+      <PageHeader kicker="Explore" title="Resource Discovery" lede="No video titles are shown until a search actually returns them." />
       <Alert code={error} />
-      {!youtube && !error ? <Loading label="Checking video search…" /> : null}
-      {youtube?.search === "unconfigured" ? <Unavailable title="Video search is unconfigured" detail={`No YouTube key is configured. Caption download is off. ${youtube.captionReason || "No caption reason returned."} ${gaps.bookmarks}`} /> : null}
-      {youtube?.search === "not_executed" ? <Unavailable title="Video search was not executed" detail={`A key is configured, and this route still does not search. Caption download is off. ${youtube.captionReason || ""}`} /> : null}
-      <h2>Provider availability</h2>
-      {providers && providers.length === 0 ? <Empty title="No providers returned">The registry list was empty.</Empty> : null}
+      {!checked && !error ? <Loading label="Checking video search…" /> : null}
+      {checked && !youtube && !error ? <section className="state state-unconfigured"><p className="kicker">Not set up</p><h2>Video search isn't set up yet</h2><p>{gaps.bookmarks}</p></section> : null}
+      {youtube ? (
+        <section className="state state-unconfigured">
+          <p className="kicker">Not set up</p>
+          <h2>{youtube.search === "unconfigured" ? "Video search isn't set up yet" : "Video search isn't available yet"}</h2>
+          <p>{gaps.bookmarks}</p>
+          <details>
+            <summary>AI info</summary>
+            <p>{youtube.captionReason || "Captions aren't available."}</p>
+          </details>
+        </section>
+      ) : null}
+      <section className="state state-unconfigured">
+        <p className="kicker">Not set up</p>
+        <h2>Video creation isn't set up</h2>
+        <p>{gaps.videoCreation}</p>
+      </section>
+      <h2>Models</h2>
+      {providers && providers.length === 0 ? <Empty title="No models yet">Nothing is listed to choose from.</Empty> : null}
       {providers && providers.length > 0 ? (
         <ul className="plain">
           {providers.map((provider) => (
             <li key={`${provider.provider}:${provider.model}`}>
-              {provider.provider} · {provider.model} · {provider.configured ? "configured" : "unconfigured"} · not eligible · not operational · not live-verified{provider.blockReason ? ` · ${provider.blockReason}` : ""}
+              <p><strong>{provider.provider}</strong> · {provider.model}</p>
+              <p>{providerStudentStatus(provider.provider, provider.configured)}</p>
+              <details>
+                <summary>AI info</summary>
+                <p>{provider.blockReason || (provider.configured ? "A key is present, and this model still isn't available." : "No key is set.")}</p>
+              </details>
             </li>
           ))}
         </ul>

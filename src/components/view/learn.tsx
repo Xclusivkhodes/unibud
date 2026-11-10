@@ -44,7 +44,7 @@ export function CompanionScreen() {
       updateMemory((current) => ({ ...current, chats: [...current.chats.filter((item) => item.id !== saved.id), saved] }));
       setChatId(saved.id);
       setMessages([]);
-      setNote("Chat opened. It is not in a server list, so it stays in this browser tab.");
+      setNote("Conversation opened. It stays on this page for this visit.");
     } catch (caught) {
       setError(errorCode(caught));
     } finally {
@@ -61,8 +61,7 @@ export function CompanionScreen() {
     try {
       const body = record(await api(`/api/chats/${chatId}/messages`, { method: "POST", body: { question, idempotencyKey: clientToken() } }));
       const turn = record(body?.providerTurn);
-      const plan = record(body?.plan);
-      setNote(`Provider turn ${typeof turn?.status === "string" ? turn.status : "not returned"}. Executed ${turn?.executed === true ? "yes" : "no"}. Assistant messages stored: ${typeof body?.assistantMessages === "number" ? body.assistantMessages : "not returned"}. ${typeof plan?.reason === "string" ? plan.reason : ""}`);
+      setNote(turn?.executed === true ? "A reply was stored." : "No model reply was produced. Your question is saved.");
       setQuestion("");
       await load(chatId);
     } catch (caught) {
@@ -89,7 +88,7 @@ export function CompanionScreen() {
 
   return (
     <>
-      <PageHeader kicker="Learn" title="Study Companion" lede="A readable transcript is one work surface. A model reply is shown only when the server stores one. Gemma Study Companion is a search alias, not a separate tool." />
+      <PageHeader kicker="Learn" title="Study Companion" lede="Ask about your topic. A reply is shown only when one is actually saved." />
       <p className="meta">{gaps.chats}</p>
       <Alert code={error} />
       <form className="ivory stack" onSubmit={(event) => void openChat(event)}>
@@ -170,7 +169,7 @@ export function StudioScreen() {
       for (const byte of bytes) binary += String.fromCharCode(byte);
       const declaredMime = file.type || "text/plain";
       const result = record(await api("/api/uploads", { method: "POST", body: { dataBase64: btoa(binary), declaredMime, filename: file.name, courseId, idempotencyKey: clientToken() } }));
-      setNote(`Upload ${typeof result?.id === "string" ? result.id : "did not return an id"}. MIME ${typeof result?.mime === "string" ? result.mime : declaredMime}. Storage ${typeof result?.storage === "string" ? result.storage : "not returned"}. Text uploads also become a source title. Images are stored without a generated lesson.`);
+      setNote(typeof result?.id === "string" ? "Upload saved. Text files also become a note title. Images are stored without a generated lesson." : "The upload didn't finish.");
     } catch (caught) {
       setError(errorCode(caught));
       setNote("");
@@ -181,7 +180,7 @@ export function StudioScreen() {
 
   return (
     <>
-      <PageHeader kicker="Learn" title="Learning Studio" lede="Eligible files are plain text, Markdown, JPEG, PNG, or WebP. The server reports queued-as-sent, then the completed upload or a recoverable error. There is no generated outline route." />
+      <PageHeader kicker="Learn" title="Learning Studio" lede="Add a note or a text, Markdown, JPEG, PNG, or WebP file. A lesson outline isn't created from the file." />
       {!courseId ? <Empty title="Select a course">A source is saved against the course in the header.</Empty> : null}
       <Alert code={error} />
       <form className="ivory stack" onSubmit={(event) => void saveNote(event)}>
@@ -203,7 +202,7 @@ export function StudioScreen() {
 export function ExplainerScreen() {
   return (
     <>
-      <PageHeader kicker="Learn" title="Explainer Studio" lede="Adjustable explanations would keep their source and depth. That save route is not in the API." />
+      <PageHeader kicker="Learn" title="Explainer Studio" lede="An explanation would keep its source and how detailed it is." />
       <Unavailable title="Explanations are not stored" detail={gaps.explanations} />
     </>
   );
@@ -212,7 +211,7 @@ export function ExplainerScreen() {
 export function CompilerScreen() {
   return (
     <>
-      <PageHeader kicker="Learn" title="Academic Compiler" lede="A study pack would keep source links and editable contents. That route is not in the API." />
+      <PageHeader kicker="Learn" title="Academic Compiler" lede="A study pack would keep links to your sources and stay editable." />
       <Unavailable title="Study packs are not composed" detail={gaps.packs} />
     </>
   );

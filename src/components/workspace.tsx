@@ -9,6 +9,11 @@ import type { SessionUser } from "../contract/types.js";
 const MEMORY_KEY = "unibud.browser-returned.v1";
 const COURSE_KEY = "unibud.course-context";
 
+export function clearAccountCache() {
+  window.sessionStorage.removeItem(MEMORY_KEY);
+  window.sessionStorage.removeItem(COURSE_KEY);
+}
+
 type WorkspaceValue = {
   me: SessionUser;
   courses: CourseView[];
