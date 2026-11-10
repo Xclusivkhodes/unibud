@@ -7,6 +7,20 @@
 
 export const GOOGLE_LIVE_USE = "blocked_pending_age_and_product_policy" as const;
 
+/**
+ * Gemma 4 ids named by https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api.
+ * This run did not call the API. Teammate-reported availability is documented separately and is not evidence.
+ */
+export const DOCUMENTED_GEMMA_MODELS = ["gemma-4-26b-a4b-it", "gemma-4-31b-it"] as const;
+
+/** Comma-separated Gemini or Gemma ids. Empty means the server has no configured model override. */
+export function configuredGeminiModelIds(): string[] {
+  return (process.env.UNIBUD_GEMINI_MODELS ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && !item.startsWith("gemini-2.5"));
+}
+
 export type ProviderId = "google" | "openai" | "anthropic" | "xai" | "loopback";
 export type TaskKind =
   | "math"
@@ -72,23 +86,6 @@ export const REGISTRY: RegistryEntry[] = [
     residency: "unspecified",
     sourceUrl: "https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api",
     evidenceId: "G1",
-    liveVerified: false,
-    operational: false,
-  },
-  {
-    provider: "google",
-    model: "gemini-4-argon",
-    host: "generativelanguage.googleapis.com",
-    documentedCapabilities: [],
-    capabilityStatus: "unknown",
-    contextTokens: null,
-    outputTokenLimit: null,
-    latency: null,
-    cost: null,
-    privacy: { training: "unpaid_may_train", retention: "not_zero_retention" },
-    residency: "unspecified",
-    sourceUrl: "https://ai.google.dev/gemini-api/docs/models",
-    evidenceId: "G4",
     liveVerified: false,
     operational: false,
   },
@@ -182,6 +179,29 @@ export function googlePolicyFailures(input: RouteInput): string[] {
   return reasons;
 }
 
+export function trainingBlock(entry: RegistryEntry): string | null {
+  if (entry.privacy.training === "unpaid_may_train" || entry.privacy.training === "unknown") return "training_unpaid_or_unknown_denied";
+  return null;
+}
+
+export function entryBlock(entry: RegistryEntry, input: RouteInput): string | null {
+  if (entry.provider === "google") {
+    const reasons = googlePolicyFailures(input);
+    const training = trainingBlock(entry);
+    if (training) reasons.push(training);
+    return reasons.join(",");
+  }
+  const training = trainingBlock(entry);
+  if (training) return training;
+  if (!input.configuredProviders.includes(entry.provider)) return "unconfigured";
+  if (!input.grants.includes(entry.provider)) return "privacy_grant_missing";
+  if (input.retention === "strict") return "retention_unknown_or_not_strict_denied";
+  if (input.residency === "strict" && entry.residency === "unspecified") return "residency_unknown_denied";
+  if (input.costMode === "known_cost_only" && entry.cost == null) return "cost_unknown_denied";
+  if (!requirementMet(entry, input.required)) return "capability_unknown_or_missing";
+  return null;
+}
+
 function requirementMet(entry: RegistryEntry, required: RouteInput["required"]): boolean {
   if (entry.capabilityStatus !== "documented") return false;
   return required.every((item) => entry.documentedCapabilities.includes(item));
@@ -194,32 +214,9 @@ export function planRoute(input: RouteInput, catalog: RegistryEntry[] = REGISTRY
   }
   const eligible: RegistryEntry[] = [];
   for (const entry of catalog) {
-    if (entry.provider === "google") {
-      blocked.push({ provider: entry.provider, model: entry.model, reason: googlePolicyFailures(input).join(",") });
-      continue;
-    }
-    if (!input.configuredProviders.includes(entry.provider)) {
-      blocked.push({ provider: entry.provider, model: entry.model, reason: "unconfigured" });
-      continue;
-    }
-    if (!input.grants.includes(entry.provider)) {
-      blocked.push({ provider: entry.provider, model: entry.model, reason: "privacy_grant_missing" });
-      continue;
-    }
-    if (input.retention === "strict") {
-      blocked.push({ provider: entry.provider, model: entry.model, reason: "retention_unknown_or_not_strict_denied" });
-      continue;
-    }
-    if (input.residency === "strict" && entry.residency === "unspecified") {
-      blocked.push({ provider: entry.provider, model: entry.model, reason: "residency_unknown_denied" });
-      continue;
-    }
-    if (input.costMode === "known_cost_only" && entry.cost == null) {
-      blocked.push({ provider: entry.provider, model: entry.model, reason: "cost_unknown_denied" });
-      continue;
-    }
-    if (!requirementMet(entry, input.required)) {
-      blocked.push({ provider: entry.provider, model: entry.model, reason: "capability_unknown_or_missing" });
+    const reason = entryBlock(entry, input);
+    if (reason) {
+      blocked.push({ provider: entry.provider, model: entry.model, reason });
       continue;
     }
     eligible.push(entry);
@@ -249,10 +246,10 @@ export function planRoute(input: RouteInput, catalog: RegistryEntry[] = REGISTRY
 
 export type FailureClass = "transient" | "policy" | "auth" | "schema" | "timeout_ambiguous";
 
-export function fallbackAfter(plan: RouteDecision, failure: FailureClass): RegistryEntry | null {
-  if (failure !== "transient") return null;
-  if (!plan.fallback) return null;
-  if (plan.fallback.provider === "google") return null;
+export function fallbackAfter(plan: RouteDecision, failure: FailureClass, input?: RouteInput): RegistryEntry | null {
+  if (failure !== "transient" || !plan.fallback) return null;
+  if (input) return entryBlock(plan.fallback, input) ? null : plan.fallback;
+  if (plan.fallback.provider === "google" || trainingBlock(plan.fallback)) return null;
   return plan.fallback;
 }
 

@@ -37,7 +37,7 @@ Shared response names live in `src/contract/types.ts`.
 
 - Cookie name: `unibud_session`
 - Flags: `HttpOnly`, `Path=/`, `SameSite=Lax`, `Max-Age` 14 days
-- `Secure` is added only when `UNIBUD_COOKIE_SECURE=1`
+- `Secure` is set by default. Local HTTP on this machine opts out only with `UNIBUD_COOKIE_INSECURE=1`
 - Mutating requests must send header `X-Unibud-Request: 1`
 - If `Origin` is sent, its host must match the `Host` header. `X-Forwarded-Host` is not trusted. A mismatch returns `{ "error": "csrf_origin" }` with status 403
 - Missing the custom header returns `{ "error": "csrf_required" }` with status 403

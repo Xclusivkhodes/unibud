@@ -63,6 +63,7 @@ import { AppError, newId } from "../security/crypto.js";
 import { inspectUpload } from "../security/uploads.js";
 import { DeviceStore } from "../device/store.js";
 import { getAppDb } from "../server/appdb.js";
+import { uploadRoot } from "../server/paths.js";
 import { clearSession, requireUser, setSession } from "../server/session.js";
 
 function fail(path: string, error: unknown): never {
@@ -142,7 +143,7 @@ export async function uploadSourceAction(formData: FormData) {
   const decision = inspectUpload(bytes, file.type || "text/plain");
   if (!decision.ok) fail("/studio", new AppError(decision.code, "Upload was rejected."));
   if (decision.mime !== "text/plain" && decision.mime !== "text/markdown") fail("/studio", new AppError("mime_rejected", "Only text sources can become notes."));
-  const dir = path.join(".data", "uploads", user.id);
+  const dir = path.join(uploadRoot(), user.id);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, decision.id), bytes);
   addSource(getAppDb(), user.id, { courseId, title: file.name, body: new TextDecoder().decode(bytes), kind: "upload" });
@@ -374,8 +375,7 @@ export async function circleAction(formData: FormData) {
   try {
     if (intent === "create") createCircle(getAppDb(), user.id, String(formData.get("name") ?? ""));
     if (intent === "invite") {
-      const result = inviteToCircle(getAppDb(), user.id, String(formData.get("circleId") ?? ""), String(formData.get("email") ?? ""));
-      if (!result.invited) fail("/circle", new AppError("unknown_email", "No account uses that email."));
+      inviteToCircle(getAppDb(), user.id, String(formData.get("circleId") ?? ""), String(formData.get("email") ?? ""));
     }
     if (intent === "accept") acceptInvite(getAppDb(), user.id, String(formData.get("circleId") ?? ""));
     if (intent === "revoke") revokeMember(getAppDb(), user.id, String(formData.get("circleId") ?? ""), String(formData.get("memberId") ?? ""));
@@ -422,7 +422,6 @@ export async function privacyAction(formData: FormData) {
 export async function deleteAccountAction() {
   const user = await requireUser();
   deleteAccount(getAppDb(), user.id);
-  new DeviceStore(process.env.UNIBUD_DEVICE_DIR || ".data/device").clear(user.id);
   await clearSession();
   redirect("/register?deleted=1");
 }

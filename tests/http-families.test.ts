@@ -83,7 +83,10 @@ test("resource routes keep owner access and reject the other account", async () 
   expect((await call(database, "PATCH", `/api/chats/${chatId}`, { title: "Stolen" }, other)).status).toBe(404);
   const asked = await call(database, "POST", `/api/chats/${chatId}/messages`, { question: "What is pH?", idempotencyKey: "msg-1" }, owner);
   const askedBody = await bodyOf(asked);
-  expect((askedBody.providerTurn as { status: string }).status).toBe("not_executed");
+  expect((askedBody.providerTurn as { status: string; text: string | null }).status).toBe("unconfigured");
+  expect((askedBody.providerTurn as { text: string | null }).text).toBeNull();
+  const storedMessages = ((await bodyOf(await call(database, "GET", `/api/chats/${chatId}/messages`, undefined, owner))) as { messages: Array<{ role: string }> }).messages;
+  expect(storedMessages.some((item) => item.role === "assistant")).toBe(false);
   expect((await call(database, "GET", `/api/chats/${chatId}/messages`, undefined, other)).status).toBe(404);
 
   const upload = await call(database, "POST", "/api/uploads", { declaredMime: "text/plain", dataBase64: Buffer.from("notes").toString("base64"), idempotencyKey: "up-1" }, owner);

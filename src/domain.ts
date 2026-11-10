@@ -1,4 +1,7 @@
+import { rmSync } from "node:fs";
+import path from "node:path";
 import { AppError, hashPassword, localDate, newId, newSessionToken, nowIso, recordedMinutes, sha256, shiftDate, studyStreak, verifyPassword } from "./security/crypto.js";
+import { deviceRoot, uploadRoot } from "./server/paths.js";
 import { all, get, run, transaction, type Db } from "./db.js";
 import { planRoute, type RouteInput } from "./providers/registry.js";
 import { reviewSm2, SCHEDULER_ID } from "./learning/scheduler.js";
@@ -652,10 +655,13 @@ export function createCircle(db: Db, ownerId: string, name: string) {
 export function inviteToCircle(db: Db, ownerId: string, circleId: string, email: string) {
   const circle = must(get<{ id: string }>(db, "SELECT id FROM circles WHERE id = ? AND owner_id = ?", circleId, ownerId));
   const user = get<{ id: string }>(db, "SELECT id FROM users WHERE email = ?", email.trim().toLowerCase());
-  if (!user) return { status: "not_found" as const, invited: false };
+  if (!user) {
+    hashPassword("invite-timing");
+    return { status: "pending" as const };
+  }
   run(db, "INSERT OR REPLACE INTO circle_members (circle_id, user_id, role, status, revoked_at, created_at) VALUES (?, ?, 'member', 'pending', NULL, ?)", circle.id, user.id, nowIso());
   notify(db, user.id, "circle_invite", "Study circle invite", "Accept the invite on the server before any shared read.", `invite:${circleId}:${user.id}`);
-  return { status: "pending" as const, invited: true, userId: user.id };
+  return { status: "pending" as const };
 }
 
 function activeMember(db: Db, circleId: string, userId: string): boolean {
@@ -811,6 +817,12 @@ export function exportAccount(db: Db, userId: string) {
 
 export function deleteAccount(db: Db, userId: string): void {
   must(get(db, "SELECT id FROM users WHERE id = ?", userId));
+  if (!/^[A-Za-z0-9-]+$/.test(userId)) throw new AppError("invalid_storage_id", "Storage id was rejected.");
+  run(db, "DELETE FROM idempotency WHERE user_id = ?", userId);
+  run(db, "DELETE FROM youtube_saved WHERE user_id = ?", userId);
+  run(db, "DELETE FROM video_bookmarks WHERE user_id = ?", userId);
+  rmSync(path.join(uploadRoot(), userId), { recursive: true, force: true });
+  rmSync(path.join(deviceRoot(), `${userId}.json`), { force: true });
   run(db, "DELETE FROM users WHERE id = ?", userId);
 }
 

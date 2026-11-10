@@ -5,6 +5,17 @@ const inflight = new Map<string, number>();
 export const MAX_INFLIGHT = 4;
 export const MAX_BODY_CHARS = 100_000;
 
+export function inflightKey(input: { token?: string | null; email?: string; source: string }): string {
+  if (input.token) return `session:${input.token}`;
+  const email = input.email?.trim().toLowerCase() ?? "";
+  if (email) return `account:${email}|source:${input.source}`;
+  return `source:${input.source}`;
+}
+
+export function resetInflightForTests(): void {
+  inflight.clear();
+}
+
 export function reserveInflight(key: string): () => void {
   const current = inflight.get(key) ?? 0;
   if (current >= MAX_INFLIGHT) throw new AppError("busy", "Too many requests.", 429);

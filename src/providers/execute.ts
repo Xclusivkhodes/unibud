@@ -10,7 +10,7 @@ export type ProviderTurn = {
 };
 
 export type ProviderTurnResult = {
-  status: "not_executed" | "ok" | "cancelled" | "ambiguous";
+  status: "not_executed" | "ok" | "cancelled" | "ambiguous" | "unconfigured";
   text: string | null;
   executed: boolean;
   fixture: boolean;

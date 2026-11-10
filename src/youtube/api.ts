@@ -139,7 +139,7 @@ export function buildPlaylistItemsUrl(playlistId: string, apiKey: string, pageTo
   return url;
 }
 
-type MockFetch = (url: string, init: { redirect: "error" }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
+export type MockFetch = (url: string, init: { redirect: "error" }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
 
 /** Audit copy of an outbound URL. The transport still receives the official `key` query. */
 export function auditYouTubeUrl(url: string): string {
@@ -187,6 +187,24 @@ export async function runMockedPlaylist(options: { apiKey: string; playlistId: s
   const itemsResponse = await options.fetchImpl(outbound[1], { redirect: "error" });
   const itemsJson = (await itemsResponse.json()) as { items?: Array<{ contentDetails?: { videoId?: string } }> };
   return { ...playlistView(playlistJson.items?.[0] ?? {}, itemsJson.items ?? []), requested: outbound.map(auditYouTubeUrl) };
+}
+
+export function youtubeApiKey(): string | undefined {
+  const value = process.env.YOUTUBE_API_KEY?.trim();
+  return value ? value : undefined;
+}
+
+/** Server entry. Reads YOUTUBE_API_KEY from the environment and never returns that value. */
+export async function searchFromServerEnv(options: {
+  query: string;
+  online?: boolean;
+  transport?: MockFetch;
+}): Promise<SearchResult & { requested?: string[] }> {
+  if (options.online === false) return { status: "offline" };
+  const apiKey = youtubeApiKey();
+  if (!apiKey) return { status: "unconfigured" };
+  if (!options.transport) return { status: "not_executed", reason: "live_youtube_call_not_authorized" };
+  return runMockedSearch({ apiKey, query: options.query, fetchImpl: options.transport });
 }
 
 export async function searchVideos(options: {

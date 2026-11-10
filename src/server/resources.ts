@@ -21,11 +21,13 @@ import {
   startSession,
 } from "../domain.js";
 import { projectile, scoreBuiltInGame } from "../learning/labs.js";
-import { executeProvider } from "../providers/execute.js";
+import { configuredProviderIds, runChatProvider, unconfiguredTurn } from "../providers/chat.js";
 import { AppError, newId, nowIso } from "../security/crypto.js";
 import { inspectUpload, storagePath } from "../security/uploads.js";
 import { DeviceStore } from "../device/store.js";
+import { readLimitedJson } from "./body.js";
 import { actor } from "./http.js";
+import { deviceRoot, uploadRoot } from "./paths.js";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -53,12 +55,8 @@ async function once(db: Db, userId: string, key: string, make: () => Promise<Res
   return response;
 }
 
-async function readJson(request: Request): Promise<Record<string, unknown>> {
-  const text = await request.text();
-  if (!text) return {};
-  const value = JSON.parse(text) as unknown;
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new AppError("invalid_json", "JSON body was rejected.", 400);
-  return value as Record<string, unknown>;
+function readJson(request: Request): Promise<Record<string, unknown>> {
+  return readLimitedJson(request);
 }
 
 const OWNED = /^\/api\/(decks|cards|labs|games|chats|uploads|graph|lens|device|sessions)(\/|$)/;
@@ -125,6 +123,7 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
     const body = await readJson(request);
     const chatId = decodeURIComponent(messages[1]);
     return once(db, userId, str(body.idempotencyKey), async () => {
+    const configured = configuredProviderIds();
     const stored = askTutor(db, userId, chatId, str(body.question), {
       task: "tutoring",
       required: ["text"],
@@ -137,10 +136,10 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
       residency: "unspecified",
       independentCheck: false,
       online: true,
-      configuredProviders: [],
+      configuredProviders: configured,
     });
-    const executed = await executeProvider({ provider: stored.plan.primary?.provider ?? "none", model: stored.plan.primary?.model ?? "none", prompt: str(body.question), signal: request.signal });
-    return json({ ...stored, providerTurn: executed });
+    const providerTurn = configured.length === 0 ? unconfiguredTurn() : await runChatProvider({ prompt: str(body.question), signal: request.signal });
+    return json({ ...stored, providerTurn });
     });
   }
   if (messages && method === "GET") {
@@ -166,7 +165,7 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
     const decision = inspectUpload(bytes, str(body.declaredMime) || "text/plain");
     if (!decision.ok) throw new AppError(decision.code, "Upload was rejected.", 400);
     storagePath(userId, decision.id);
-    const dir = path.join(process.env.UNIBUD_UPLOAD_DIR || path.join(".data", "uploads"), userId);
+    const dir = path.join(uploadRoot(), userId);
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, decision.id), bytes);
     run(db, "INSERT INTO uploads (id, user_id, course_id, mime, byte_length, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", decision.id, userId, str(body.courseId) || null, decision.mime, decision.byteLength, decision.sha256, nowIso());
@@ -179,7 +178,7 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
     const id = decodeURIComponent(upload[1]);
     const row = get<{ mime: string }>(db, "SELECT mime FROM uploads WHERE id = ? AND user_id = ?", id, userId);
     if (!row) return json({ error: "not_found" }, 404);
-    const file = path.join(process.env.UNIBUD_UPLOAD_DIR || path.join(".data", "uploads"), userId, id);
+    const file = path.join(uploadRoot(), userId, id);
     const bytes = readFileSync(file);
     return new Response(bytes, { status: 200, headers: { "content-type": row.mime, "cache-control": "private, no-store" } });
   }
@@ -204,11 +203,11 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
     return json(decision);
   }
   if (pathname === "/api/device/notes" && method === "GET") {
-    return json({ records: new DeviceStore(process.env.UNIBUD_DEVICE_DIR || ".data/device").read(userId), syncClaim: "saved_on_device_until_acked" });
+    return json({ records: new DeviceStore(deviceRoot()).read(userId), syncClaim: "saved_on_device_until_acked" });
   }
   if (pathname === "/api/device/notes" && method === "POST") {
     const body = await readJson(request);
-    const store = new DeviceStore(process.env.UNIBUD_DEVICE_DIR || ".data/device");
+    const store = new DeviceStore(deviceRoot());
     store.save(userId, { entity: "note", id: str(body.artifactId), body: body.body, baseRev: Number(body.rev ?? 0), syncState: "saved_on_device" });
     return json({ syncState: "saved_on_device" }, 201);
   }
@@ -216,16 +215,13 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   if (sync && method === "POST") {
     const body = await readJson(request);
     const result = applyArtifactUpdate(db, userId, decodeURIComponent(sync[1]), Number(body.rev), str(body.body), str(body.idempotencyKey) || newId());
-    const store = new DeviceStore(process.env.UNIBUD_DEVICE_DIR || ".data/device");
+    const store = new DeviceStore(deviceRoot());
     if (result.status === "acked" && "rev" in result) {
       store.applyAck(userId, decodeURIComponent(sync[1]), { status: "acked", rev: result.rev ?? Number(body.rev) + 1, body: str(body.body) });
       return json({ status: "acked", rev: result.rev, syncState: "synced" });
     }
-    if ("server" in result) {
-      store.applyConflict(userId, decodeURIComponent(sync[1]), result.server, str(body.body));
-      return json({ status: "conflict", server: result.server, clientBody: str(body.body), syncState: "conflict" }, 409);
-    }
-    return json({ status: result.status }, 409);
+    if (result.status === "conflict") return json({ error: "sync_conflict" }, 409);
+    return json({ error: "sync_conflict" }, 409);
   }
   if (pathname === "/api/sessions" && method === "POST") {
     const body = await readJson(request);
@@ -261,7 +257,7 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   }
   const deviceOne = pathname.match(/^\/api\/device\/notes\/([^/]+)$/);
   if (deviceOne && method === "GET") {
-    const record = new DeviceStore(process.env.UNIBUD_DEVICE_DIR || ".data/device").read(userId).find((item) => item.id === decodeURIComponent(deviceOne[1]));
+    const record = new DeviceStore(deviceRoot()).read(userId).find((item) => item.id === decodeURIComponent(deviceOne[1]));
     if (!record) return json({ error: "not_found" }, 404);
     return json({ record });
   }

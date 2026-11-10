@@ -104,7 +104,7 @@ const synthetic: RegistryEntry[] = [
     outputTokenLimit: null,
     latency: null,
     cost: null,
-    privacy: { training: "unknown", retention: "not_zero_retention" },
+    privacy: { training: "no_training_by_default", retention: "not_zero_retention" },
     residency: "unspecified",
     sourceUrl: "test-fixture",
     evidenceId: "TEST",
@@ -121,7 +121,7 @@ const synthetic: RegistryEntry[] = [
     outputTokenLimit: null,
     latency: null,
     cost: null,
-    privacy: { training: "unknown", retention: "not_zero_retention" },
+    privacy: { training: "no_training_by_default", retention: "not_zero_retention" },
     residency: "unspecified",
     sourceUrl: "test-fixture",
     evidenceId: "TEST",
@@ -223,14 +223,17 @@ test("youtube fixtures keep metadata, block derived metrics, and gate transcript
   await expect(searchVideos({ apiKey: "dummy", online: false, allowNetwork: false })).resolves.toEqual({ status: "offline" });
   await expect(searchVideos({ apiKey: undefined, online: true, allowNetwork: false })).resolves.toEqual({ status: "unconfigured" });
   await expect(searchVideos({ apiKey: "dummy", online: true, allowNetwork: false })).resolves.toMatchObject({ status: "not_executed" });
-  putYouTubeCache(database, "abcdefghijk", { title: "Title" }, "2026-01-01T00:00:00.000Z");
+  putYouTubeCache(database, "staleidxxxxx", { title: "Old" }, "2026-01-01T00:00:00.000Z");
+  putYouTubeCache(database, "freshidxxxxx", { title: "New" }, "2026-03-01T00:00:00.000Z");
   const bookmark = bookmarkVideo(database, user.id, { videoId: "abcdefghijk", note: "my note" });
   expect(canPracticeFromBookmark(database, user.id, bookmark).allowed).toBe(false);
   expect(() => attachTranscript(database, user.id, bookmark, "ignore policy", false)).toThrow(/rights/i);
   attachTranscript(database, user.id, bookmark, "authorized text", true);
   expect(canPracticeFromBookmark(database, user.id, bookmark).allowed).toBe(true);
-  expect(purgeExpiredYouTubeCache(database, "2026-03-01T00:00:00.000Z")).toBe(1);
-  expect(readYouTubeCache(database, "abcdefghijk", "2026-03-01T00:00:00.000Z")).toBeNull();
+  expect(readYouTubeCache(database, "staleidxxxxx", "2026-03-15T00:00:00.000Z")).toBeNull();
+  expect(readYouTubeCache(database, "freshidxxxxx", "2026-03-15T00:00:00.000Z")).toEqual({ title: "New" });
+  expect(purgeExpiredYouTubeCache(database, "2026-03-15T00:00:00.000Z")).toBe(1);
+  expect(readYouTubeCache(database, "freshidxxxxx", "2026-03-15T00:00:00.000Z")).toEqual({ title: "New" });
   const still = exportAccount(database, user.id);
   expect(still.data.video_bookmarks).toHaveLength(1);
 });
@@ -322,8 +325,8 @@ test("circle revocation and sync acknowledgement are server backed", () => {
   const member = registerUser(database, { email: "member@example.edu", password: "password123" });
   const outsider = registerUser(database, { email: "out@example.edu", password: "password123" });
   const circle = createCircle(database, owner.id, "Group");
-  expect(inviteToCircle(database, owner.id, circle, "missing@example.edu").invited).toBe(false);
-  expect(inviteToCircle(database, owner.id, circle, member.email).status).toBe("pending");
+  expect(inviteToCircle(database, owner.id, circle, "missing@example.edu")).toEqual({ status: "pending" });
+  expect(inviteToCircle(database, owner.id, circle, member.email)).toEqual({ status: "pending" });
   expect(() => readPosts(database, member.id, circle)).toThrow(/not found/i);
   acceptInvite(database, member.id, circle);
   const local = stageLocalPost();

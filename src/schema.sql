@@ -266,6 +266,25 @@ CREATE TABLE IF NOT EXISTS youtube_cache (
   fetched_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS youtube_saved (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('video', 'playlist')),
+  resource_id TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS youtube_metadata (
+  kind TEXT NOT NULL CHECK (kind IN ('video', 'playlist')),
+  resource_id TEXT NOT NULL,
+  title TEXT,
+  channel TEXT,
+  thumbnail_url TEXT,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (kind, resource_id)
+);
+
 CREATE TABLE IF NOT EXISTS video_bookmarks (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

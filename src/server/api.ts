@@ -34,11 +34,10 @@ import {
 import { GOOGLE_LIVE_USE, REGISTRY, googlePolicyFailures, type RouteInput } from "../providers/registry.js";
 import { AppError } from "../security/crypto.js";
 import { captionDownloadStatus } from "../youtube/api.js";
-import { SESSION_COOKIE, sessionCookie, tokenFromRequest } from "./http.js";
-import { assertBodyBudget, reserveInflight } from "./limits.js";
+import { readLimitedJson } from "./body.js";
+import { clearedSessionCookie, sessionCookie, tokenFromRequest } from "./http.js";
+import { assertBodyBudget, inflightKey, reserveInflight } from "./limits.js";
 import { handleOwnedResources } from "./resources.js";
-
-const MAX_BODY = 100_000;
 
 function json(body: unknown, status = 200, extra?: HeadersInit): Response {
   const headers = new Headers(extra);
@@ -53,17 +52,8 @@ export function toErrorResponse(error: unknown): Response {
   return json({ error: "internal" }, 500);
 }
 
-async function readJson(request: Request): Promise<Record<string, unknown>> {
-  const text = await request.text();
-  if (text.length > MAX_BODY) throw new AppError("body_too_large", "Body was rejected.", 413);
-  if (!text) return {};
-  try {
-    const value = JSON.parse(text) as unknown;
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("shape");
-    return value as Record<string, unknown>;
-  } catch {
-    throw new AppError("invalid_json", "JSON body was rejected.", 400);
-  }
+function readJson(request: Request): Promise<Record<string, unknown>> {
+  return readLimitedJson(request);
 }
 
 function assertMutation(request: Request): void {
@@ -100,6 +90,7 @@ function providerStatus(input: RouteInput): ProviderPublicStatus[] {
   return REGISTRY.map((entry) => {
     const envName = entry.provider === "google" ? "GEMINI_API_KEY" : entry.provider === "openai" ? "OPENAI_API_KEY" : entry.provider === "anthropic" ? "ANTHROPIC_API_KEY" : entry.provider === "xai" ? "XAI_API_KEY" : "";
     const configured = envName ? Boolean(process.env[envName]?.trim()) : false;
+    const policy = blocks.get(`${entry.provider}:${entry.model}`);
     return {
       provider: entry.provider,
       model: entry.model,
@@ -107,36 +98,37 @@ function providerStatus(input: RouteInput): ProviderPublicStatus[] {
       eligible: false,
       liveVerified: false,
       operational: false,
-      blockReason: blocks.get(`${entry.provider}:${entry.model}`) ?? (configured ? "not_live_authorized" : "unconfigured"),
+      blockReason: configured ? policy ?? "not_live_authorized" : "unconfigured",
     };
   });
 }
 
-export async function handleApi(request: Request, db: Db): Promise<Response> {
+export async function handleApi(request: Request, db: Db, options?: { source?: string }): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/$/, "") || "/";
   const method = request.method.toUpperCase();
+  const source = options?.source?.trim() || "local";
   let release = () => {};
   try {
     assertBodyBudget(request);
-    release = reserveInflight(tokenFromRequest(request) ?? "anonymous");
     if (method !== "GET" && method !== "HEAD") assertMutation(request);
-    if (path === "/api/auth/register" && method === "POST") {
+    if ((path === "/api/auth/register" || path === "/api/auth/login") && method === "POST") {
       const body = await readJson(request);
-      const created = registerUser(db, { email: str(body.email), password: str(body.password) });
-      if (str(body.displayName)) saveProfile(db, created.id, { display_name: str(body.displayName), onboarding_status: "completed" }, 1);
-      const session = login(db, created.email, str(body.password));
-      return json({ userId: created.id }, 201, { "set-cookie": sessionCookie(session.token) });
-    }
-    if (path === "/api/auth/login" && method === "POST") {
-      const body = await readJson(request);
+      release = reserveInflight(inflightKey({ email: str(body.email), source }));
+      if (path === "/api/auth/register") {
+        const created = registerUser(db, { email: str(body.email), password: str(body.password) });
+        if (str(body.displayName)) saveProfile(db, created.id, { display_name: str(body.displayName), onboarding_status: "completed" }, 1);
+        const session = login(db, created.email, str(body.password));
+        return json({ userId: created.id }, 201, { "set-cookie": sessionCookie(session.token) });
+      }
       const session = login(db, str(body.email), str(body.password));
       return json({ userId: session.userId }, 200, { "set-cookie": sessionCookie(session.token) });
     }
+    release = reserveInflight(inflightKey({ token: tokenFromRequest(request), source }));
     if (path === "/api/auth/logout" && method === "POST") {
       const token = tokenFromRequest(request);
       if (token) logout(db, token);
-      return json({ ok: true }, 200, { "set-cookie": `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0` });
+      return json({ ok: true }, 200, { "set-cookie": clearedSessionCookie() });
     }
     if (path === "/api/me" && method === "GET") {
       const actor = user(db, request);
@@ -333,7 +325,7 @@ export async function handleApi(request: Request, db: Db): Promise<Response> {
     if (path === "/api/account" && method === "DELETE") {
       const actor = user(db, request);
       deleteAccount(db, actor.id);
-      return json({ deleted: true }, 200, { "set-cookie": `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0` });
+      return json({ deleted: true }, 200, { "set-cookie": clearedSessionCookie() });
     }
     const owned = await handleOwnedResources(request, db, path, method);
     if (owned) return owned;
