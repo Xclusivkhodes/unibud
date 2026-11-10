@@ -6,6 +6,8 @@ Base URL for local serve: `http://127.0.0.1:3000`. JSON in and out. Errors are e
 
 Contract version remains 2. Course and topic JSON uses the SQLite column names (`subject_name`, `goal_text`, `course_id`, `self_reported_level`), not camelCase. `src/contract/types.ts` matches those wire names. The earlier camelCase `CourseRecord` and `TopicRecord` fields were never what the server sent.
 
+GET `/api/courses` and GET `/api/courses/:id` return `CourseSummary`: `id`, `name`, `subject_name`, `goal_text`. POST `/api/courses` returns the full `CourseRecord`, which also has `user_id`, `created_at`, and `rev`. POST `/api/courses/:id/topics` returns the full topic row (`TopicRecord`).
+
 Schedule preview failures, frozen by HTTP tests:
 
 | Case | Status | Body |
@@ -49,9 +51,9 @@ All ids are UUID strings created by the server. Queries are limited to the signe
 | GET `/api/tasks` | | `{ tasks }` including `due_at` |
 | POST `/api/tasks` | `{ title, courseId?, topicId?, dueAt?, confirmed?, reason? }` | `201 { task }` |
 | POST `/api/cram/preview` | `{ courseId, title, examDate, availableHours, syllabus, now? }` | Contract v2. Returns `previewId`, `fingerprint`, `dueSemantics: "calendar_day"`, and the exact day buckets. `dueAt` is `YYYY-MM-DDT00:00:00.000Z`, a day-bucket serialization, not a 09:00 appointment |
-| POST `/api/cram/confirm` | `{ previewId }` | Writes that stored preview only. `409` `stale_preview` if topics or evidence changed. `400` `preview_required` if the token is missing. A body with only `courseId` is no longer enough |
+| POST `/api/cram/confirm` | `{ previewId }` | Writes the stored preview payload only. It does not run the scheduler again. Same failure table as above, for both cram and autopilot. A body with only `courseId` is not enough |
 | POST `/api/autopilot/preview` | `{ courseId, now? }` | Contract v2. Returns `previewId` and the exact `after` rows. Day buckets stay inside today through the next exam day that is still today or later. Tasks that cannot fit are `placed: false` and are not given a date after the exam |
-| POST `/api/autopilot/confirm` | `{ previewId }` | Applies the stored rows only when the task/exam fingerprint still matches. A task added or edited after preview returns `409` and does not change dates |
+| POST `/api/autopilot/confirm` | `{ previewId }` | Writes `due_at` from the stored `after` rows only. A task added or edited after preview, or a revision that no longer matches the stored row, returns `409` `{ "error": "stale_preview" }` and does not change dates |
 | GET `/api/misconceptions` | | hypotheses and single errors. Not a diagnosis |
 | POST `/api/misconceptions/:id/correct` | | `{ ok: true }`. Closes that evidence episode |
 | POST `/api/circles` | `{ name }` | `201 { id }` |
@@ -73,6 +75,8 @@ GET `/api/providers` returns registry rows with `liveVerified: false`, `operatio
 
 GET `/api/youtube/status` returns `configured`, `search` of `unconfigured` or `not_executed`, and `captionDownload: false`. This route does not call YouTube.
 
+Server-only request builders live in `src/providers/request.ts` and `src/youtube/api.ts`. They are not HTTP routes. A test may inject a transport. Nothing in this process calls `fetch` for a provider or for YouTube. Google dispatch stays blocked: the Gemini URL and body can be described, and the transport is not called. OpenAI and xAI use `POST /v1/chat/completions` with `Authorization: Bearer` from `OPENAI_API_KEY` or `XAI_API_KEY`. Anthropic uses `POST /v1/messages` with `x-api-key` from `ANTHROPIC_API_KEY` and `anthropic-version: 2026-10-21`. Gemini would use `x-goog-api-key` from `GEMINI_API_KEY` and no key in the URL. YouTube Data API requests put `key` on the query string, which is that API's documented credential. Returned audit URLs and video cards redact that value. Credentials are not written to client JSON or logs.
+
 ## Contract version
 
 Scheduling confirm is version 2. Version 1 confirm bodies that only sent `courseId` are rejected with `preview_required`. There is no automatic upgrade: the client must show the preview and send its `previewId`.
@@ -81,23 +85,23 @@ Scheduling confirm is version 2. Version 1 confirm bodies that only sent `course
 
 ## Additional owned routes
 
-`src/server/resources.ts` handles these for the signed-in user. Another account receives 404.
+`src/server/resources.ts` handles these for the signed-in user. An item route for another account returns `404` `{ "error": "not_found" }`. A collection route returns `200` and only the caller's rows, so the other account sees an empty list rather than `404`. POST bodies may include `idempotencyKey`. The same user and key replay the stored JSON status and body and do not insert a second row.
 
 | Method and path | Role |
 |---|---|
-| POST `/api/decks`, POST `/api/decks/:id/cards`, GET `/api/cards`, POST `/api/cards/:id/reviews` | Decks, cards, and revealed self-ratings |
-| POST `/api/labs/projectile`, GET `/api/labs` | Deterministic projectile run |
-| POST `/api/games/built-in`, GET `/api/games` | Built-in game score labeled not mastery |
+| POST `/api/decks`, POST `/api/decks/:id/cards`, GET `/api/cards`, POST `/api/cards/:id/reviews` | Decks, cards, and revealed self-ratings. Another account's deck or card is `404` |
+| POST `/api/labs/projectile`, GET `/api/labs`, GET `/api/labs/:id` | Deterministic projectile run. Item read is owner-only |
+| POST `/api/games/built-in`, GET `/api/games`, GET `/api/games/:id` | Built-in game score labeled not mastery. Item read is owner-only |
 | POST `/api/chats`, POST/GET `/api/chats/:id/messages`, PATCH/DELETE `/api/chats/:id` | Stored questions. Provider execution stays `not_executed` unless a test injects a transport; this HTTP path does not |
-| POST `/api/uploads`, GET `/api/uploads/:id` | Owner-only text or image bytes. No filesystem path in the JSON |
-| GET `/api/graph`, POST `/api/graph/nodes`, POST `/api/graph/edges` | Learner or inferred edges. Inferred is not an academically verified prerequisite |
-| POST `/api/lens` | Capability decision. `interpretation` stays null |
-| GET/POST `/api/device/notes`, POST `/api/device/notes/:id/sync` | Device copy versus server ack or conflict |
-| POST `/api/sessions`, POST `/api/sessions/:id/pause`, POST `/api/sessions/:id/complete` | Study session timing |
+| POST `/api/uploads`, GET `/api/uploads/:id` | Owner-only text or image bytes. JSON has `id`, `mime`, `byteLength`, and `storage: "private"`. No filesystem path |
+| GET `/api/graph`, POST `/api/graph/nodes`, GET `/api/graph/nodes/:id`, POST `/api/graph/edges` | Learner or inferred edges. Inferred is not an academically verified prerequisite. Node item reads are owner-only. An edge write is stored for the caller and does not return the other account's node |
+| POST `/api/lens` | Capability decision. `interpretation` stays null. This is not a stored cross-account record |
+| GET/POST `/api/device/notes`, GET `/api/device/notes/:id`, POST `/api/device/notes/:id/sync` | Device copy versus server ack or conflict. Sync `409` keeps both bodies (`status: "conflict"`). That conflict is not the preview error envelope |
+| POST `/api/sessions`, GET `/api/sessions/:id`, POST `/api/sessions/:id/pause`, POST `/api/sessions/:id/complete` | Study session timing. Item and command routes are owner-only |
 
 ## Responses
 
-Every JSON response sets `Cache-Control: private, no-store`. No `Access-Control-Allow-Origin` header is set. The browser is expected to call relative `/api` on the Next server (`npm run dev` or `npm start`, `127.0.0.1:3000`). `npm run serve` is the same handler on that same default port for API-only use. Do not point the Next app at a second origin.
+Every JSON response sets `Cache-Control: private, no-store`, including actor and auth failures, resource errors, and the `npm run serve` fallback `{ "error": "internal" }`. No `Access-Control-Allow-Origin` header is set. The browser is expected to call relative `/api` on the Next server (`npm run dev` or `npm start`, `127.0.0.1:3000`). `npm run serve` is the same handler on that same default port for API-only use. Do not point the Next app at a second origin.
 
 Origin checks use the `Host` header only. `X-Forwarded-Host` is ignored, so a client cannot make a foreign origin match by sending that header.
 

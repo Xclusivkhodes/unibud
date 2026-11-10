@@ -590,7 +590,7 @@ function cramFingerprint(db: Db, userId: string, input: { courseId: string; titl
   return sha256(JSON.stringify({ kind: "cram", courseId: input.courseId, title: input.title, examDate: input.examDate.slice(0, 10), availableHours: input.availableHours, syllabus: input.syllabus, nowDay: (input.now ?? nowIso()).slice(0, 10), topics: snapshot }));
 }
 
-function autopilotFingerprint(db: Db, userId: string, courseId: string, now: string): string {
+export function autopilotFingerprint(db: Db, userId: string, courseId: string, now: string): string {
   const tasks = all<{ id: string; rev: number; due_at: string | null }>(db, "SELECT id, rev, due_at FROM tasks WHERE user_id = ? AND course_id = ? AND status = 'open' ORDER BY id", userId, courseId);
   const exams = all<{ id: string; exam_date: string }>(db, "SELECT id, exam_date FROM exams WHERE user_id = ? AND course_id = ? ORDER BY id", userId, courseId);
   return sha256(JSON.stringify({ kind: "autopilot", courseId, nowDay: now.slice(0, 10), tasks, exams }));
@@ -634,7 +634,7 @@ export function confirmAutopilotPreview(db: Db, userId: string, previewId: strin
   const payload = JSON.parse(row.payload_json) as { courseId: string; now: string; proposal: ReturnType<typeof proposeAutopilot> };
   if (autopilotFingerprint(db, userId, payload.courseId, payload.now) !== row.fingerprint) throw new AppError("stale_preview", "Preview no longer matches stored records.", 409);
   const saved = confirmAutopilot(db, userId, payload.proposal);
-  if (!saved.applied) return saved;
+  if (!saved.applied) throw new AppError("stale_preview", "Preview no longer matches stored records.", 409);
   run(db, "UPDATE schedule_previews SET consumed_at = ? WHERE id = ? AND user_id = ?", nowIso(), previewId, userId);
   return { ...saved, dueSemantics: DUE_SEMANTICS };
 }

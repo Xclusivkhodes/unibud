@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { openDatabase, type Db } from "../src/db.js";
+import { createCourse, saveArtifact } from "../src/domain.js";
 import { handleApi } from "../src/server/api.js";
+import { internalErrorHeaders } from "../src/server/http.js";
 import * as bridge from "../src/app/api/[[...path]]/route.js";
 import { buildPlaylistItemsUrl, buildPlaylistListUrl, buildSearchListUrl, buildVideosListUrl, runMockedPlaylist, runMockedSearch } from "../src/youtube/api.js";
 import { executeProvider, normalizeStatus, runMockEval } from "../src/providers/execute.js";
@@ -156,35 +158,140 @@ test("cram preview tokens are owned, exact, stale, and single use", async () => 
 });
 
 test("youtube builders stay on the data api and mocked providers do not call google", async () => {
-  const requested: string[] = [];
-  const fetchImpl = async (url: string, init: { redirect: "error" }) => {
-    expect(init.redirect).toBe("error");
-    requested.push(url);
-    if (url.includes("/search")) return { ok: true, json: async () => ({ items: [{ id: { videoId: "abcdefghijk" }, snippet: { title: "Title" } }] }) };
-    if (url.includes("/videos")) return { ok: true, json: async () => ({ items: [{ id: "abcdefghijk", snippet: { title: "Title", channelTitle: "Channel" } }] }) };
-    if (url.includes("/playlists")) return { ok: true, json: async () => ({ items: [{ contentDetails: { itemCount: 1 } }] }) };
-    return { ok: true, json: async () => ({ items: [{ contentDetails: { videoId: "abcdefghijk" } }] }) };
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = () => {
+    throw new Error("live network is not used");
   };
-  const search = await runMockedSearch({ apiKey: "dummy-test-key", query: "acids", fetchImpl });
-  expect(new URL(search.requested[0]).pathname).toBe("/youtube/v3/search");
-  expect(new URL(search.requested[1]).pathname).toBe("/youtube/v3/videos");
-  expect(search.requested.some((url) => url.includes("/captions"))).toBe(false);
-  expect(search.status).toBe("ok");
-  if (search.status !== "ok") throw new Error("fixture search did not return cards");
-  expect(search.cards[0].duration).toBeNull();
-  expect(search.cards[0].qualityScore).toBeNull();
-  expect(buildSearchListUrl("acids", "dummy-test-key").hostname).toBe("www.googleapis.com");
-  expect(buildVideosListUrl(["abcdefghijk"], "dummy-test-key").searchParams.get("part")).toBe("snippet,contentDetails,status");
-  const playlist = await runMockedPlaylist({ apiKey: "dummy-test-key", playlistId: "PLxxxx", fetchImpl });
-  expect(playlist.aggregateDuration).toBe("not_computed_policy_blocked");
-  expect(new URL(buildPlaylistListUrl("PLxxxx", "k")).pathname).toBe("/youtube/v3/playlists");
-  expect(new URL(buildPlaylistItemsUrl("PLxxxx", "k")).searchParams.get("maxResults")).toBe("50");
-  const evaluated = await runMockEval([{ id: "g", provider: "google", model: "gemma-4-26b-a4b-it", prompt: "x", status: 200 }]);
-  expect(evaluated[0].transportCalls).toBe(0);
-  expect(evaluated[0].score).toBeNull();
-  expect(normalizeStatus(429, false)).toEqual({ code: "rate_limited", retryable: true });
-  const aborted = new AbortController();
-  aborted.abort();
-  expect((await executeProvider({ provider: "openai", model: "synthetic", prompt: "x", signal: aborted.signal })).status).toBe("cancelled");
-  expect(requested.every((url) => url.startsWith("https://www.googleapis.com/"))).toBe(true);
+  try {
+    const requested: string[] = [];
+    const fetchImpl = async (url: string, init: { redirect: "error" }) => {
+      expect(init.redirect).toBe("error");
+      requested.push(url);
+      if (url.includes("/search")) return { ok: true, json: async () => ({ items: [{ id: { videoId: "abcdefghijk" }, snippet: { title: "Title" } }] }) };
+      if (url.includes("/videos")) return { ok: true, json: async () => ({ items: [{ id: "abcdefghijk", snippet: { title: "Title", channelTitle: "Channel" } }] }) };
+      if (url.includes("/playlists")) return { ok: true, json: async () => ({ items: [{ contentDetails: { itemCount: 1 } }] }) };
+      return { ok: true, json: async () => ({ items: [{ contentDetails: { videoId: "abcdefghijk" } }] }) };
+    };
+    const search = await runMockedSearch({ apiKey: "dummy-test-key", query: "acids", fetchImpl });
+    expect(new URL(search.requested[0]).pathname).toBe("/youtube/v3/search");
+    expect(new URL(search.requested[1]).pathname).toBe("/youtube/v3/videos");
+    expect(search.requested.join(" ")).not.toContain("dummy-test-key");
+    expect(search.requested.some((url) => url.includes("/captions"))).toBe(false);
+    expect(search.status).toBe("ok");
+    if (search.status !== "ok") throw new Error("fixture search did not return cards");
+    expect(JSON.stringify(search.cards)).not.toContain("dummy-test-key");
+    expect(search.cards[0].duration).toBeNull();
+    expect(search.cards[0].qualityScore).toBeNull();
+    expect(buildSearchListUrl("acids", "dummy-test-key").hostname).toBe("www.googleapis.com");
+    expect(buildSearchListUrl("acids", "dummy-test-key").searchParams.get("videoEmbeddable")).toBe("true");
+    expect(buildVideosListUrl(["abcdefghijk"], "dummy-test-key").searchParams.get("part")).toBe("snippet,contentDetails,status");
+    const playlist = await runMockedPlaylist({ apiKey: "dummy-test-key", playlistId: "PLxxxx", fetchImpl });
+    expect(playlist.aggregateDuration).toBe("not_computed_policy_blocked");
+    expect(playlist.requested.join(" ")).not.toContain("dummy-test-key");
+    expect(new URL(buildPlaylistListUrl("PLxxxx", "k")).pathname).toBe("/youtube/v3/playlists");
+    expect(new URL(buildPlaylistItemsUrl("PLxxxx", "k")).searchParams.get("maxResults")).toBe("50");
+    const evaluated = await runMockEval([{ id: "g", provider: "google", model: "gemma-4-26b-a4b-it", prompt: "x", status: 200 }]);
+    expect(evaluated[0].transportCalls).toBe(0);
+    expect(evaluated[0].score).toBeNull();
+    expect(normalizeStatus(429, false)).toEqual({ code: "rate_limited", retryable: true });
+    const aborted = new AbortController();
+    aborted.abort();
+    expect((await executeProvider({ provider: "openai", model: "synthetic", prompt: "x", signal: aborted.signal })).status).toBe("cancelled");
+    expect(requested.every((url) => url.startsWith("https://www.googleapis.com/") && url.includes("key=dummy-test-key"))).toBe(true);
+    expect(buildSearchListUrl("acids", "dummy-test-key").searchParams.get("part")).toBe("snippet");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("remaining owned routes are visible to the owner and hidden from the other account", async () => {
+  const database = db();
+  const ownerResponse = await call(database, "POST", "/api/auth/register", { email: "owner2@example.edu", password: "password123" });
+  const owner = cookieFrom(ownerResponse);
+  const ownerId = ((await bodyOf(ownerResponse)) as { userId: string }).userId;
+  const other = await account(database, "other2@example.edu");
+  const course = createCourse(database, ownerId, { name: "Owned" }) as { id: string };
+  const listed = await call(database, "GET", `/api/courses/${course.id}`, undefined, owner);
+  const summary = ((await bodyOf(listed)) as { course: { subject_name: string; user_id?: string } }).course;
+  expect(summary.subject_name).toBe("");
+  expect(summary.user_id).toBeUndefined();
+
+  const deck = ((await bodyOf(await call(database, "POST", "/api/decks", { title: "Facts" }, owner))) as { deck: { id: string } }).deck;
+  const card = await call(database, "POST", `/api/decks/${deck.id}/cards`, { front: "Q", back: "A" }, owner);
+  expect(card.status).toBe(201);
+  const cardId = ((await bodyOf(card)) as { card: { id: string } }).card.id;
+  expect((await call(database, "POST", `/api/decks/${deck.id}/cards`, { front: "no", back: "no" }, other)).status).toBe(404);
+  const review = await call(database, "POST", `/api/cards/${cardId}/reviews`, { quality: 5, revealed: true }, owner);
+  expect(review.status).toBe(201);
+  const hiddenReview = await call(database, "POST", `/api/cards/${cardId}/reviews`, { quality: 5, revealed: true }, other);
+  expect(hiddenReview.status).toBe(404);
+  expect(hiddenReview.headers.get("cache-control")).toContain("no-store");
+  expect(hiddenReview.headers.get("access-control-allow-origin")).toBeNull();
+  const ownerCards = ((await bodyOf(await call(database, "GET", "/api/cards", undefined, owner))) as { cards: Array<{ id: string }> }).cards;
+  const otherCards = ((await bodyOf(await call(database, "GET", "/api/cards", undefined, other))) as { cards: Array<{ id: string }> }).cards;
+  expect(ownerCards.some((item) => item.id === cardId)).toBe(true);
+  expect(otherCards.some((item) => item.id === cardId)).toBe(false);
+
+  const game = await call(database, "POST", "/api/games/built-in", { answers: ["projectile", "ph"] }, owner);
+  const gameId = ((await bodyOf(game)) as { id: string }).id;
+  expect((await call(database, "GET", `/api/games/${gameId}`, undefined, owner)).status).toBe(200);
+  const ownerGames = ((await bodyOf(await call(database, "GET", "/api/games", undefined, owner))) as { results: Array<{ id: string }> }).results;
+  const otherGames = ((await bodyOf(await call(database, "GET", "/api/games", undefined, other))) as { results: Array<{ id: string }> }).results;
+  expect(ownerGames.some((item) => item.id === gameId)).toBe(true);
+  expect(otherGames.some((item) => item.id === gameId)).toBe(false);
+
+  const lab = await call(database, "POST", "/api/labs/projectile", { speed: 12, degrees: 30 }, owner);
+  const labId = ((await bodyOf(lab)) as { id: string }).id;
+  const ownerLabs = ((await bodyOf(await call(database, "GET", "/api/labs", undefined, owner))) as { runs: Array<{ id: string }> }).runs;
+  const otherLabs = ((await bodyOf(await call(database, "GET", "/api/labs", undefined, other))) as { runs: Array<{ id: string }> }).runs;
+  expect(ownerLabs.some((item) => item.id === labId)).toBe(true);
+  expect(otherLabs.some((item) => item.id === labId)).toBe(false);
+
+  const chatId = ((await bodyOf(await call(database, "POST", "/api/chats", { title: "Chat" }, owner))) as { id: string }).id;
+  expect((await call(database, "POST", `/api/chats/${chatId}/messages`, { question: "pH?" }, owner)).status).toBe(200);
+  expect((await call(database, "GET", `/api/chats/${chatId}/messages`, undefined, owner)).status).toBe(200);
+  expect((await call(database, "POST", `/api/chats/${chatId}/messages`, { question: "steal" }, other)).status).toBe(404);
+  expect((await call(database, "DELETE", `/api/chats/${chatId}`, undefined, other)).status).toBe(404);
+  expect((await call(database, "DELETE", `/api/chats/${chatId}`, undefined, owner)).status).toBe(200);
+  expect((await call(database, "GET", `/api/chats/${chatId}/messages`, undefined, owner)).status).toBe(404);
+
+  const uploadDir = process.env.UNIBUD_UPLOAD_DIR ?? "";
+  const upload = await call(database, "POST", "/api/uploads", { declaredMime: "text/plain", dataBase64: Buffer.from("notes").toString("base64") }, owner);
+  const uploadBody = JSON.stringify(await bodyOf(upload));
+  expect(uploadBody).not.toContain(uploadDir);
+  expect(uploadBody).not.toContain(".data");
+  expect(uploadBody).not.toContain("storagePath");
+  const uploadId = (JSON.parse(uploadBody) as { id: string }).id;
+  const file = await call(database, "GET", `/api/uploads/${uploadId}`, undefined, owner);
+  expect([...file.headers.entries()].join(" ")).not.toContain(uploadDir);
+
+  const nodeId = ((await bodyOf(await call(database, "POST", "/api/graph/nodes", { label: "Acid" }, owner))) as { id: string }).id;
+  const ownerGraph = (await bodyOf(await call(database, "GET", "/api/graph", undefined, owner))) as { nodes: Array<{ id: string }>; edges: Array<{ id: string }> };
+  const otherGraph = (await bodyOf(await call(database, "GET", "/api/graph", undefined, other))) as { nodes: Array<{ id: string }>; edges: Array<{ id: string }> };
+  expect(ownerGraph.nodes.some((item) => item.id === nodeId)).toBe(true);
+  expect(otherGraph.nodes.some((item) => item.id === nodeId)).toBe(false);
+  const foreignEdge = await call(database, "POST", "/api/graph/edges", { fromId: nodeId, toId: nodeId, origin: "learner" }, other);
+  expect(foreignEdge.status).toBe(201);
+  const edgeId = ((await bodyOf(foreignEdge)) as { id: string }).id;
+  const ownerAfter = (await bodyOf(await call(database, "GET", "/api/graph", undefined, owner))) as { edges: Array<{ id: string }> };
+  expect(ownerAfter.edges.some((item) => item.id === edgeId)).toBe(false);
+
+  const artifact = saveArtifact(database, ownerId, { courseId: course.id, kind: "note", title: "Note", body: "v1", label: "learner_authored" }) as { id: string; rev: number };
+  expect((await call(database, "POST", "/api/device/notes", { artifactId: artifact.id, body: "local", rev: artifact.rev }, owner)).status).toBe(201);
+  const synced = await call(database, "POST", `/api/device/notes/${artifact.id}/sync`, { rev: artifact.rev, body: "v2", idempotencyKey: "sync-1" }, owner);
+  expect(synced.status).toBe(200);
+  expect((await bodyOf(synced)).status).toBe("acked");
+  expect((await call(database, "POST", `/api/device/notes/${artifact.id}/sync`, { rev: artifact.rev, body: "v3", idempotencyKey: "sync-2" }, other)).status).toBe(404);
+  const notes = ((await bodyOf(await call(database, "GET", "/api/device/notes", undefined, owner))) as { records: Array<{ id: string }> }).records;
+  const otherNotes = ((await bodyOf(await call(database, "GET", "/api/device/notes", undefined, other))) as { records: Array<{ id: string }> }).records;
+  expect(notes.some((item) => item.id === artifact.id)).toBe(true);
+  expect(otherNotes.some((item) => item.id === artifact.id)).toBe(false);
+
+  const sessionId = ((await bodyOf(await call(database, "POST", "/api/sessions", { kind: "study" }, owner))) as { id: string }).id;
+  expect((await call(database, "GET", `/api/sessions/${sessionId}`, undefined, owner)).status).toBe(200);
+  expect((await call(database, "POST", `/api/sessions/${sessionId}/pause`, { pausedMs: 1000 }, owner)).status).toBe(200);
+  expect((await call(database, "POST", `/api/sessions/${sessionId}/complete`, undefined, other)).status).toBe(404);
+  expect((await call(database, "POST", `/api/sessions/${sessionId}/complete`, undefined, owner)).status).toBe(200);
+  expect(internalErrorHeaders()["cache-control"]).toBe("private, no-store");
+  expect(internalErrorHeaders()["access-control-allow-origin"]).toBeUndefined();
 });

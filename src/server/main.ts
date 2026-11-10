@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { getAppDb } from "./appdb.js";
 import { handleApi } from "./api.js";
+import { internalErrorHeaders } from "./http.js";
 
 const host = "127.0.0.1";
 const port = Number(process.env.PORT || 3000);
@@ -24,7 +25,7 @@ const server = createServer(async (incoming, outgoing) => {
     outgoing.writeHead(response.status, responseHeaders);
     outgoing.end(Buffer.from(await response.arrayBuffer()));
   } catch {
-    outgoing.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+    outgoing.writeHead(500, internalErrorHeaders());
     outgoing.end(JSON.stringify({ error: "internal" }));
   }
 });

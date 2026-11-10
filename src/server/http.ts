@@ -18,6 +18,14 @@ export function sessionCookie(token: string): string {
   return `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${14 * 24 * 60 * 60}${secure}`;
 }
 
+export function internalErrorHeaders(): Record<string, string> {
+  return {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "private, no-store",
+    pragma: "no-cache",
+  };
+}
+
 export function privateJson(body: unknown, status = 200, extra?: HeadersInit): Response {
   const headers = new Headers(extra);
   headers.set("content-type", "application/json; charset=utf-8");
