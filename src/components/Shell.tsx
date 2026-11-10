@@ -2,74 +2,107 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
-import { groups, mobileNav } from "../nav.js";
-import { logoutAction } from "../app/actions.js";
+import { useEffect, useState } from "react";
+import { groups, mobileNav, type Dest } from "../nav.js";
+import { Logo } from "./Bits.js";
+import { api } from "./http.js";
+import { messageFor, mobileDestination } from "./present.js";
+import { clearAccountCache, useWorkspace, WorkspaceGate } from "./workspace.js";
 
-type Course = { id: string; name: string };
+function NavGroup({ group, pathname, onNavigate }: { group: { id: string; label: string; items: Dest[] }; pathname: string; onNavigate: () => void }) {
+  const active = group.items.some((item) => item.href === pathname);
+  const [expanded, setExpanded] = useState(active);
+  useEffect(() => { if (active) setExpanded(true); }, [active]);
+  return (
+    <details id={`group-${group.id}`} className="group" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <summary>
+        {group.label}
+        <span className="sr">{expanded ? "expanded" : "collapsed"}</span>
+      </summary>
+      <ul>
+        {group.items.map((item) => (
+          <li key={item.href}>
+            <Link href={item.href} aria-current={pathname === item.href ? "page" : undefined} onClick={onNavigate}>{item.label}</Link>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
 
-export function Shell({ displayName, courses, children }: { displayName: string; courses: Course[]; children: React.ReactNode }) {
+function Frame({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const { me, courses, coursesError, courseId, setCourseId, online } = useWorkspace();
   const [open, setOpen] = useState(false);
+  const mobile = mobileDestination(pathname);
+  const selected = courses.find((course) => course.id === courseId);
+
+  async function logout() {
+    try {
+      await api("/api/auth/logout", { method: "POST", body: {} });
+    } finally {
+      clearAccountCache();
+      window.location.assign("/login");
+    }
+  }
+
   return (
     <div className="shell">
       <a className="skip" href="#content">Skip to content</a>
-      <aside className={open ? "rail open" : "rail"}>
-        <div className="logo-plate">
-          <img src="/brand/unibud-primary-logo-reference.png" width={1028} height={442} alt="UniBud" />
-        </div>
+      <aside id="learning-rail" className={open ? "rail open" : "rail"}>
+        <Logo />
         <p className="eyebrow">Your workspace</p>
         <nav aria-label="Learning">
-          {groups.map((group) =>
-            group.href ? (
-              <Link key={group.id} className="nav-link" href={group.href} aria-current={pathname === group.href ? "page" : undefined} onClick={() => setOpen(false)}>
-                {group.label}
-              </Link>
-            ) : (
-              <details key={group.id} className="group" open={group.items.some((item) => pathname === item.href)}>
-                <summary>{group.label}</summary>
-                <ul>
-                  {group.items.map((item) => (
-                    <li key={item.href}>
-                      <Link href={item.href} aria-current={pathname === item.href ? "page" : undefined} onClick={() => setOpen(false)}>
-                        {item.label}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            ),
-          )}
+          {groups.map((group) => group.href ? (
+            <Link key={group.id} className="nav-link" href={group.href} aria-current={pathname === group.href ? "page" : undefined} onClick={() => setOpen(false)}>{group.label}</Link>
+          ) : (
+            <NavGroup key={group.id} group={group} pathname={pathname} onNavigate={() => setOpen(false)} />
+          ))}
         </nav>
+        <div className="rail-search">
+          <form className="search" action="/search" role="search">
+            <label className="sr" htmlFor="q-menu">Search tools</label>
+            <input id="q-menu" name="q" placeholder="Search topics, notes and tools" />
+          </form>
+          <Link className="nav-link" href="/tools" onClick={() => setOpen(false)}>Help</Link>
+        </div>
         <div className="rail-foot stack">
-          <p className="eyebrow">{displayName || "Student"}</p>
-          <Link className="nav-link" href="/settings">Profile and settings</Link>
-          <Link className="nav-link" href="/activity">Activity</Link>
-          <form action={logoutAction}><button className="btn quiet" type="submit">Log out</button></form>
+          <p className="eyebrow">{me.email}</p>
+          <button className="btn quiet" type="button" onClick={() => void logout()}>Log out</button>
         </div>
       </aside>
-      <div className="main">
+      {open ? <button className="scrim" type="button" aria-label="Close menu" onClick={() => setOpen(false)} /> : null}
+      <div className="workspace">
         <header className="topbar">
-          <button className="btn quiet menu" type="button" onClick={() => setOpen((value) => !value)}>Menu</button>
-          <form className="search" action="/search">
-            <label className="sr" htmlFor="q">Search notes and tools</label>
+          <button className="btn quiet menu" type="button" aria-expanded={open} aria-controls="learning-rail" onClick={() => setOpen((value) => !value)}>{open ? "Close" : "Menu"}</button>
+          <Logo compact />
+          <form className="search" action="/search" role="search">
+            <label className="sr" htmlFor="q">Search tools</label>
             <input id="q" name="q" placeholder="Search topics, notes and tools" />
-            <button className="btn quiet" type="submit">Search</button>
           </form>
-          <Link className="btn quiet" href="/tools">Help</Link>
+          <label className="course-select">
+            <span>Course</span>
+            <select value={courseId} onChange={(event) => setCourseId(event.target.value)} aria-label="Course context">
+              <option value="">No course selected</option>
+              {courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}
+            </select>
+          </label>
+          <Link className="btn quiet help-link" href="/tools">Help</Link>
         </header>
-        {courses.length > 0 ? (
-          <p className="kicker">Course · {courses.map((course) => course.name).join(", ")}</p>
-        ) : (
-          <p className="kicker">No course saved yet</p>
-        )}
-        <div id="content">{children}</div>
+        {!online ? <p className="alert" role="status">You're offline. Nothing new is sent until you're back online.</p> : null}
+        {coursesError ? <p className="alert" role="alert">Courses could not be loaded. {messageFor(coursesError)}</p> : null}
+        {selected ? <p className="context">Course · {selected.name}{selected.subject ? ` · ${selected.subject}` : ""}</p> : <p className="context">No course saved yet</p>}
+        <main id="content">{children}</main>
       </div>
       <nav className="bottom-nav" aria-label="Mobile">
         {mobileNav.map((item) => (
-          <Link key={item.href} href={item.href} aria-current={pathname === item.href ? "page" : undefined}>{item.label}</Link>
+          <Link key={item.href} href={item.href} aria-current={mobile === item.href ? "page" : undefined}>{item.label}</Link>
         ))}
       </nav>
     </div>
   );
+}
+
+export function Shell({ children }: { children: React.ReactNode }) {
+  return <WorkspaceGate><Frame>{children}</Frame></WorkspaceGate>;
 }

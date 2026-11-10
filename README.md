@@ -22,7 +22,9 @@ npm run typecheck
 npm run dev
 ```
 
-`npm run dev` and `npm start` serve the Next app and `/api` on `127.0.0.1:3000`. The browser should call relative `/api`. `npm run serve` runs the same API handler alone on that default port; do not run it beside Next. `npm run typecheck:backend` is the server project only. `npm run typecheck` is the full app check and currently fails in `src/components/screens.tsx` because `Games` uses `total` without destructuring it. That failure is not a green app typecheck.
+`npm run dev` and `npm run build` pass `--webpack`. Next 16 otherwise uses Turbopack, which ignores `experimental.extensionAlias` and the webpack `module.parser.javascript.url` setting in `next.config.ts`. Those settings are what let `.js` imports resolve to TypeScript and let `src/db.ts` read `schema.sql`. Leave `--webpack` on both scripts.
+
+`npm run dev` and `npm start` serve the Next app and `/api` on `127.0.0.1:3000`. The browser should call relative `/api`. `npm run serve` runs the same API handler alone on that default port; do not run it beside Next. `npm run typecheck:backend` is the server project only. `npm run typecheck` is the full app check.
 
 ## Environment variable names
 
