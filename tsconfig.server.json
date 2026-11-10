@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "outDir": "dist-server",
+    "rootDir": "src",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src/server/**/*.ts", "src/domain.ts", "src/db.ts", "src/contract/**/*.ts", "src/security/**/*.ts", "src/learning/**/*.ts", "src/providers/**/*.ts", "src/youtube/**/*.ts", "src/device/**/*.ts"],
+  "exclude": ["src/server/session.ts"]
+}
