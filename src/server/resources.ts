@@ -38,6 +38,21 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+async function once(db: Db, userId: string, key: string, make: () => Promise<Response> | Response): Promise<Response> {
+  if (!key) return make();
+  const prior = get<{ response_json: string }>(db, "SELECT response_json FROM idempotency WHERE user_id = ? AND key = ?", userId, key);
+  if (prior) {
+    const saved = JSON.parse(prior.response_json) as { status: number; body: unknown };
+    return json(saved.body, saved.status);
+  }
+  const response = await make();
+  if (response.status < 500) {
+    const body = await response.clone().json();
+    run(db, "INSERT INTO idempotency (user_id, key, response_json, created_at) VALUES (?, ?, ?, ?)", userId, key, JSON.stringify({ status: response.status, body }), nowIso());
+  }
+  return response;
+}
+
 async function readJson(request: Request): Promise<Record<string, unknown>> {
   const text = await request.text();
   if (!text) return {};
@@ -55,12 +70,13 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   const userId = found.id;
   if (pathname === "/api/decks" && method === "POST") {
     const body = await readJson(request);
-    return json({ deck: createDeck(db, userId, { title: str(body.title), courseId: str(body.courseId) || undefined }) }, 201);
+    return once(db, userId, str(body.idempotencyKey), () => json({ deck: createDeck(db, userId, { title: str(body.title), courseId: str(body.courseId) || undefined }) }, 201));
   }
   const deckCards = pathname.match(/^\/api\/decks\/([^/]+)\/cards$/);
   if (deckCards && method === "POST") {
     const body = await readJson(request);
-    return json({ card: addCard(db, userId, { deckId: decodeURIComponent(deckCards[1]), front: str(body.front), back: str(body.back), label: str(body.label) || "learner_authored" }) }, 201);
+    const deckId = decodeURIComponent(deckCards[1]);
+    return once(db, userId, str(body.idempotencyKey), () => json({ card: addCard(db, userId, { deckId, front: str(body.front), back: str(body.back), label: str(body.label) || "learner_authored" }) }, 201));
   }
   if (pathname === "/api/cards" && method === "GET") {
     return json({ cards: all(db, "SELECT id, deck_id, front, back, due_at FROM cards WHERE user_id = ?", userId) });
@@ -68,36 +84,47 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   const review = pathname.match(/^\/api\/cards\/([^/]+)\/reviews$/);
   if (review && method === "POST") {
     const body = await readJson(request);
-    const result = reviewCard(db, userId, decodeURIComponent(review[1]), Number(body.quality), body.revealed === true, body.scoringMethod === "objective" ? "objective" : "self_rated");
-    return json(result, 201);
+    const cardId = decodeURIComponent(review[1]);
+    return once(db, userId, str(body.idempotencyKey), () => json(reviewCard(db, userId, cardId, Number(body.quality), body.revealed === true, body.scoringMethod === "objective" ? "objective" : "self_rated"), 201));
   }
   if (pathname === "/api/labs/projectile" && method === "POST") {
     const body = await readJson(request);
-    const result = projectile(Number(body.speed), Number(body.degrees));
-    const id = saveLab(db, userId, { lab: result.lab, params: { speed: body.speed, degrees: body.degrees }, result: result.result, assumptions: result.assumptions, courseId: str(body.courseId) || undefined });
-    return json({ id, ...result, timedAppointment: false }, 201);
+    return once(db, userId, str(body.idempotencyKey), () => {
+      let result;
+      try {
+        result = projectile(Number(body.speed), Number(body.degrees));
+      } catch (error) {
+        if (error instanceof Error && error.message === "invalid_projectile_input") throw new AppError("invalid_lab_input", "Lab input was rejected.", 400);
+        throw error;
+      }
+      const id = saveLab(db, userId, { lab: result.lab, params: { speed: body.speed, degrees: body.degrees }, result: result.result, assumptions: result.assumptions, courseId: str(body.courseId) || undefined });
+      return json({ id, ...result, timedAppointment: false }, 201);
+    });
   }
   if (pathname === "/api/labs" && method === "GET") {
     return json({ runs: all(db, "SELECT id, lab, assumptions, created_at FROM lab_runs WHERE user_id = ?", userId) });
   }
   if (pathname === "/api/games/built-in" && method === "POST") {
     const body = await readJson(request);
-    const answers = Array.isArray(body.answers) ? body.answers.map((item) => String(item)) : [];
-    const scored = scoreBuiltInGame(answers);
-    const id = saveGame(db, userId, scored.score, scored.total);
-    return json({ id, ...scored }, 201);
+    return once(db, userId, str(body.idempotencyKey), () => {
+      const answers = Array.isArray(body.answers) ? body.answers.map((item) => String(item)) : [];
+      const scored = scoreBuiltInGame(answers);
+      const id = saveGame(db, userId, scored.score, scored.total);
+      return json({ id, ...scored }, 201);
+    });
   }
   if (pathname === "/api/games" && method === "GET") {
     return json({ results: all(db, "SELECT id, game, score, total, learning_claim FROM game_results WHERE user_id = ?", userId) });
   }
   if (pathname === "/api/chats" && method === "POST") {
     const body = await readJson(request);
-    return json({ id: createChat(db, userId, str(body.title) || "Study question", str(body.courseId) || undefined) }, 201);
+    return once(db, userId, str(body.idempotencyKey), () => json({ id: createChat(db, userId, str(body.title) || "Study question", str(body.courseId) || undefined) }, 201));
   }
   const messages = pathname.match(/^\/api\/chats\/([^/]+)\/messages$/);
   if (messages && method === "POST") {
     const body = await readJson(request);
     const chatId = decodeURIComponent(messages[1]);
+    return once(db, userId, str(body.idempotencyKey), async () => {
     const stored = askTutor(db, userId, chatId, str(body.question), {
       task: "tutoring",
       required: ["text"],
@@ -114,6 +141,7 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
     });
     const executed = await executeProvider({ provider: stored.plan.primary?.provider ?? "none", model: stored.plan.primary?.model ?? "none", prompt: str(body.question), signal: request.signal });
     return json({ ...stored, providerTurn: executed });
+    });
   }
   if (messages && method === "GET") {
     const chatId = decodeURIComponent(messages[1]);
@@ -133,16 +161,18 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   }
   if (pathname === "/api/uploads" && method === "POST") {
     const body = await readJson(request);
+    return once(db, userId, str(body.idempotencyKey), () => {
     const bytes = Buffer.from(str(body.dataBase64), "base64");
     const decision = inspectUpload(bytes, str(body.declaredMime) || "text/plain");
     if (!decision.ok) throw new AppError(decision.code, "Upload was rejected.", 400);
-    const relative = storagePath(userId, decision.id);
+    storagePath(userId, decision.id);
     const dir = path.join(process.env.UNIBUD_UPLOAD_DIR || path.join(".data", "uploads"), userId);
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, decision.id), bytes);
     run(db, "INSERT INTO uploads (id, user_id, course_id, mime, byte_length, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", decision.id, userId, str(body.courseId) || null, decision.mime, decision.byteLength, decision.sha256, nowIso());
     if (decision.mime.startsWith("text/") && str(body.courseId)) addSource(db, userId, { courseId: str(body.courseId), title: str(body.filename) || decision.id, body: new TextDecoder().decode(bytes), kind: "upload" });
-    return json({ id: decision.id, mime: decision.mime, byteLength: decision.byteLength, storage: "private", path: undefined }, 201);
+    return json({ id: decision.id, mime: decision.mime, byteLength: decision.byteLength, storage: "private" }, 201);
+    });
   }
   const upload = pathname.match(/^\/api\/uploads\/([^/]+)$/);
   if (upload && method === "GET") {
@@ -158,11 +188,11 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   }
   if (pathname === "/api/graph/nodes" && method === "POST") {
     const body = await readJson(request);
-    return json({ id: addGraphNode(db, userId, str(body.label), str(body.topicId) || undefined) }, 201);
+    return once(db, userId, str(body.idempotencyKey), () => json({ id: addGraphNode(db, userId, str(body.label), str(body.topicId) || undefined) }, 201));
   }
   if (pathname === "/api/graph/edges" && method === "POST") {
     const body = await readJson(request);
-    return json({ id: addGraphEdge(db, userId, str(body.fromId), str(body.toId), body.origin === "inferred" ? "inferred" : "learner") }, 201);
+    return once(db, userId, str(body.idempotencyKey), () => json({ id: addGraphEdge(db, userId, str(body.fromId), str(body.toId), body.origin === "inferred" ? "inferred" : "learner") }, 201));
   }
   if (pathname === "/api/lens" && method === "POST") {
     const body = await readJson(request);
@@ -199,7 +229,7 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   }
   if (pathname === "/api/sessions" && method === "POST") {
     const body = await readJson(request);
-    return json({ id: startSession(db, userId, { courseId: str(body.courseId) || undefined, kind: str(body.kind) || "study" }) }, 201);
+    return once(db, userId, str(body.idempotencyKey), () => json({ id: startSession(db, userId, { courseId: str(body.courseId) || undefined, kind: str(body.kind) || "study" }) }, 201));
   }
   const pause = pathname.match(/^\/api\/sessions\/([^/]+)\/pause$/);
   if (pause && method === "POST") {
@@ -210,6 +240,36 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   const complete = pathname.match(/^\/api\/sessions\/([^/]+)\/complete$/);
   if (complete && method === "POST") {
     return json(completeSession(db, userId, decodeURIComponent(complete[1])));
+  }
+  const labOne = pathname.match(/^\/api\/labs\/([^/]+)$/);
+  if (labOne && method === "GET") {
+    const row = get(db, "SELECT id, lab, assumptions, created_at FROM lab_runs WHERE id = ? AND user_id = ?", decodeURIComponent(labOne[1]), userId);
+    if (!row) return json({ error: "not_found" }, 404);
+    return json({ run: row });
+  }
+  const gameOne = pathname.match(/^\/api\/games\/([^/]+)$/);
+  if (gameOne && method === "GET") {
+    const row = get(db, "SELECT id, game, score, total, learning_claim FROM game_results WHERE id = ? AND user_id = ?", decodeURIComponent(gameOne[1]), userId);
+    if (!row) return json({ error: "not_found" }, 404);
+    return json({ result: row });
+  }
+  const nodeOne = pathname.match(/^\/api\/graph\/nodes\/([^/]+)$/);
+  if (nodeOne && method === "GET") {
+    const row = get(db, "SELECT id, label, topic_id FROM graph_nodes WHERE id = ? AND user_id = ?", decodeURIComponent(nodeOne[1]), userId);
+    if (!row) return json({ error: "not_found" }, 404);
+    return json({ node: row });
+  }
+  const deviceOne = pathname.match(/^\/api\/device\/notes\/([^/]+)$/);
+  if (deviceOne && method === "GET") {
+    const record = new DeviceStore(process.env.UNIBUD_DEVICE_DIR || ".data/device").read(userId).find((item) => item.id === decodeURIComponent(deviceOne[1]));
+    if (!record) return json({ error: "not_found" }, 404);
+    return json({ record });
+  }
+  const sessionOne = pathname.match(/^\/api\/sessions\/([^/]+)$/);
+  if (sessionOne && method === "GET") {
+    const row = get(db, "SELECT id, status, kind, started_at FROM study_sessions WHERE id = ? AND user_id = ?", decodeURIComponent(sessionOne[1]), userId);
+    if (!row) return json({ error: "not_found" }, 404);
+    return json({ session: row });
   }
   return json({ error: "not_found" }, 404);
 }

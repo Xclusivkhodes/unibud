@@ -100,6 +100,71 @@ export type SearchResult =
   | { status: "not_executed"; reason: "live_youtube_call_not_authorized" }
   | { status: "ok"; cards: VideoCard[]; quota: ReturnType<typeof quotaForSearchAndHydrate>; fixture: boolean };
 
+export function buildSearchListUrl(query: string, apiKey: string): URL {
+  const url = new URL("https://www.googleapis.com/youtube/v3/search");
+  url.searchParams.set("part", "snippet");
+  url.searchParams.set("type", "video");
+  url.searchParams.set("q", query);
+  url.searchParams.set("videoEmbeddable", "true");
+  url.searchParams.set("safeSearch", "moderate");
+  url.searchParams.set("maxResults", "10");
+  url.searchParams.set("key", apiKey);
+  return url;
+}
+
+export function buildVideosListUrl(ids: string[], apiKey: string): URL {
+  const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+  url.searchParams.set("part", "snippet,contentDetails,status");
+  url.searchParams.set("id", ids.join(","));
+  url.searchParams.set("key", apiKey);
+  return url;
+}
+
+export function buildPlaylistListUrl(playlistId: string, apiKey: string): URL {
+  const url = new URL("https://www.googleapis.com/youtube/v3/playlists");
+  url.searchParams.set("part", "snippet,contentDetails");
+  url.searchParams.set("id", playlistId);
+  url.searchParams.set("key", apiKey);
+  return url;
+}
+
+export function buildPlaylistItemsUrl(playlistId: string, apiKey: string, pageToken?: string): URL {
+  const url = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
+  url.searchParams.set("part", "snippet,contentDetails");
+  url.searchParams.set("playlistId", playlistId);
+  url.searchParams.set("maxResults", "50");
+  if (pageToken) url.searchParams.set("pageToken", pageToken);
+  url.searchParams.set("key", apiKey);
+  return url;
+}
+
+type MockFetch = (url: string, init: { redirect: "error" }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
+
+export async function runMockedSearch(options: { apiKey: string; query: string; fetchImpl: MockFetch }): Promise<SearchResult & { requested: string[] }> {
+  const requested: string[] = [];
+  const searchUrl = buildSearchListUrl(options.query, options.apiKey);
+  requested.push(searchUrl.toString());
+  const searchResponse = await options.fetchImpl(searchUrl.toString(), { redirect: "error" });
+  const search = (await searchResponse.json()) as { items?: Record<string, unknown>[] };
+  const ids = (search.items ?? []).map((item) => (item.id as { videoId?: string } | undefined)?.videoId).filter((id): id is string => Boolean(id));
+  const videosUrl = buildVideosListUrl(ids, options.apiKey);
+  requested.push(videosUrl.toString());
+  const videosResponse = await options.fetchImpl(videosUrl.toString(), { redirect: "error" });
+  const videos = (await videosResponse.json()) as { items?: Record<string, unknown>[] };
+  const byId = new Map((videos.items ?? []).map((video) => [String(video.id), video]));
+  const cards = (search.items ?? []).map((item) => cardFromParts(item, byId.get(String((item.id as { videoId?: string }).videoId)) ?? null)).filter((card): card is VideoCard => card !== null);
+  return { status: "ok", cards, quota: quotaForSearchAndHydrate(), fixture: true, requested };
+}
+
+export async function runMockedPlaylist(options: { apiKey: string; playlistId: string; fetchImpl: MockFetch }): Promise<ReturnType<typeof playlistView> & { requested: string[] }> {
+  const requested = [buildPlaylistListUrl(options.playlistId, options.apiKey).toString(), buildPlaylistItemsUrl(options.playlistId, options.apiKey).toString()];
+  const playlistResponse = await options.fetchImpl(requested[0], { redirect: "error" });
+  const playlistJson = (await playlistResponse.json()) as { items?: Array<{ contentDetails?: { itemCount?: number } }> };
+  const itemsResponse = await options.fetchImpl(requested[1], { redirect: "error" });
+  const itemsJson = (await itemsResponse.json()) as { items?: Array<{ contentDetails?: { videoId?: string } }> };
+  return { ...playlistView(playlistJson.items?.[0] ?? {}, itemsJson.items ?? []), requested };
+}
+
 export async function searchVideos(options: {
   apiKey: string | undefined;
   online: boolean;

@@ -25,7 +25,7 @@ These files are the current UI attempt. They are not an accepted interface.
 - `public/brand/unibud-navy-owl-reference.png` (198×233, SHA-256 `0160cd73adba2488b05f39e240e082952199d72f2da4ed5edc26fb3392665b8a`)
 - `docs/design/approved-glass-v2.jpg` is the approved reference image. Do not use it as the application background or as a screenshot.
 
-`src/components/screens.tsx` does not typecheck: `Games` lists `total` on its props type but does not destructure it, then renders `{total}`. `npm run typecheck` excludes `src/components` and page/layout files so the backend check can pass. A full Next production build was not treated as green for that reason.
+`src/components/screens.tsx` does not typecheck: `Games` lists `total` on its props type but does not destructure it, then renders `{total}` at line 403. `npm run typecheck` includes that file and the other screens. It is the full-app check and fails on this defect. `npm run typecheck:backend` is a separate server-only command. A green backend check is not a green app check. Root `src/app/layout.tsx` and `src/app/page.tsx` are backend-owned bootstrap files, not part of the frontend allowlist.
 
 ## Boundary
 

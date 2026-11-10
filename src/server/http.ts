@@ -18,11 +18,19 @@ export function sessionCookie(token: string): string {
   return `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${14 * 24 * 60 * 60}${secure}`;
 }
 
+export function privateJson(body: unknown, status = 200, extra?: HeadersInit): Response {
+  const headers = new Headers(extra);
+  headers.set("content-type", "application/json; charset=utf-8");
+  headers.set("cache-control", "private, no-store");
+  headers.set("pragma", "no-cache");
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
 export function actor(db: Db, request: Request): { id: string; email: string; data_class: string } | Response {
   const token = tokenFromRequest(request);
-  if (!token) return Response.json({ error: "unauthenticated" }, { status: 401 });
+  if (!token) return privateJson({ error: "unauthenticated" }, 401);
   const user = userFromSession(db, token);
-  if (!user) return Response.json({ error: "unauthenticated" }, { status: 401 });
+  if (!user) return privateJson({ error: "unauthenticated" }, 401);
   return user;
 }
 
@@ -30,11 +38,11 @@ export function postRegister(db: Db, body: { email?: string; password?: string }
   try {
     const user = registerUser(db, { email: body.email ?? "", password: body.password ?? "" });
     const session = login(db, user.email, body.password ?? "");
-    return Response.json({ userId: user.id }, { status: 201, headers: { "set-cookie": sessionCookie(session.token) } });
+    return privateJson({ userId: user.id }, 201, { "set-cookie": sessionCookie(session.token) });
   } catch (error) {
     const code = error instanceof AppError ? error.code : "internal";
     const status = error instanceof AppError ? error.status : 500;
-    return Response.json({ error: code }, { status });
+    return privateJson({ error: code }, status);
   }
 }
 
@@ -42,6 +50,6 @@ export function readCourse(db: Db, request: Request, courseId: string): Response
   const user = actor(db, request);
   if (user instanceof Response) return user;
   const course = get(db, "SELECT id, name, goal_text, subject_name FROM courses WHERE id = ? AND user_id = ?", courseId, user.id);
-  if (!course) return Response.json({ error: "not_found" }, { status: 404 });
-  return Response.json({ course });
+  if (!course) return privateJson({ error: "not_found" }, 404);
+  return privateJson({ course });
 }

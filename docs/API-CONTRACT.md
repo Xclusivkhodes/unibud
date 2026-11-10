@@ -2,7 +2,20 @@
 
 Implemented by `src/server/api.ts` and covered by `tests/api.test.ts` plus the loopback smoke of `npm run serve`. Paths not listed here are not HTTP endpoints, even if a domain function exists.
 
-Base URL for local serve: `http://127.0.0.1:3000`. JSON in and out. Errors are `{ "error": "<code>" }`.
+Base URL for local serve: `http://127.0.0.1:3000`. JSON in and out. Errors are exactly `{ "error": "<code>" }` with no extra fields.
+
+Contract version remains 2. Course and topic JSON uses the SQLite column names (`subject_name`, `goal_text`, `course_id`, `self_reported_level`), not camelCase. `src/contract/types.ts` matches those wire names. The earlier camelCase `CourseRecord` and `TopicRecord` fields were never what the server sent.
+
+Schedule preview failures, frozen by HTTP tests:
+
+| Case | Status | Body |
+|---|---|---|
+| Confirm without `previewId` | 400 | `{ "error": "preview_required" }` |
+| Unknown preview, or another account's preview | 404 | `{ "error": "preview_not_found" }` |
+| Preview already consumed | 409 | `{ "error": "preview_consumed" }` |
+| Records changed since that preview | 409 | `{ "error": "stale_preview" }` |
+
+Previews do not expire on a timer. There is no freshness window. They become unusable only when consumed or when the fingerprint no longer matches.
 
 ## Session
 

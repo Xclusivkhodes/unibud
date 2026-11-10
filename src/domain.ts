@@ -614,7 +614,7 @@ export function confirmCramPreview(db: Db, userId: string, previewId: string) {
   if (!row) throw new AppError("preview_not_found", "Preview was not found.", 404);
   if (row.consumed_at) throw new AppError("preview_consumed", "Preview was already used.", 409);
   const payload = JSON.parse(row.payload_json) as { input: { courseId: string; title: string; examDate: string; availableHours: number; syllabus: string; now?: string }; proposal: ReturnType<typeof proposeCram> };
-  if (cramFingerprint(db, userId, payload.input) !== row.fingerprint) return { status: "stale_preview" as const, applied: false };
+  if (cramFingerprint(db, userId, payload.input) !== row.fingerprint) throw new AppError("stale_preview", "Preview no longer matches stored records.", 409);
   const saved = confirmCram(db, userId, payload.proposal);
   run(db, "UPDATE schedule_previews SET consumed_at = ? WHERE id = ? AND user_id = ?", nowIso(), previewId, userId);
   return { status: "confirmed" as const, applied: true, dueSemantics: DUE_SEMANTICS, ...saved };
@@ -632,7 +632,7 @@ export function confirmAutopilotPreview(db: Db, userId: string, previewId: strin
   if (!row) throw new AppError("preview_not_found", "Preview was not found.", 404);
   if (row.consumed_at) throw new AppError("preview_consumed", "Preview was already used.", 409);
   const payload = JSON.parse(row.payload_json) as { courseId: string; now: string; proposal: ReturnType<typeof proposeAutopilot> };
-  if (autopilotFingerprint(db, userId, payload.courseId, payload.now) !== row.fingerprint) return { status: "stale_preview" as const, applied: false };
+  if (autopilotFingerprint(db, userId, payload.courseId, payload.now) !== row.fingerprint) throw new AppError("stale_preview", "Preview no longer matches stored records.", 409);
   const saved = confirmAutopilot(db, userId, payload.proposal);
   if (!saved.applied) return saved;
   run(db, "UPDATE schedule_previews SET consumed_at = ? WHERE id = ? AND user_id = ?", nowIso(), previewId, userId);
