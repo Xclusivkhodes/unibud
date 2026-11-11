@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { get } from "../db.js";
 import { userFromSession } from "../domain.js";
 import { getAppDb } from "./appdb.js";
-import { SESSION_COOKIE } from "./http.js";
+import { cookieIsSecure, SESSION_COOKIE } from "./http.js";
 
 export async function setSession(token: string) {
   const jar = await cookies();
@@ -11,7 +11,7 @@ export async function setSession(token: string) {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
-    secure: process.env.UNIBUD_COOKIE_SECURE === "1",
+    secure: cookieIsSecure(),
     maxAge: 14 * 24 * 60 * 60,
   });
 }

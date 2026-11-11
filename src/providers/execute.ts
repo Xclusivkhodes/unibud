@@ -10,7 +10,7 @@ export type ProviderTurn = {
 };
 
 export type ProviderTurnResult = {
-  status: "not_executed" | "ok" | "cancelled" | "ambiguous";
+  status: "not_executed" | "ok" | "cancelled" | "ambiguous" | "unconfigured";
   text: string | null;
   executed: boolean;
   fixture: boolean;
@@ -21,7 +21,10 @@ export type ProviderTurnResult = {
 /** Default path performs no network I/O. A test may pass a transport and allowNetwork. */
 export async function executeProvider(input: ProviderTurn): Promise<ProviderTurnResult> {
   if (input.signal?.aborted) return { status: "cancelled", text: null, executed: false, fixture: false, billing: "not_sent" };
-  if (input.provider === "google" || input.allowNetwork !== true || !input.transport) {
+  if (input.provider === "google") {
+    return { status: "not_executed", text: null, executed: false, fixture: false, billing: "not_sent", normalized: { code: "policy", retryable: false } };
+  }
+  if (input.allowNetwork !== true || !input.transport) {
     return { status: "not_executed", text: null, executed: false, fixture: false, billing: "not_sent" };
   }
   try {
@@ -32,7 +35,8 @@ export async function executeProvider(input: ProviderTurn): Promise<ProviderTurn
     if (error instanceof AppError) throw error;
     const status = typeof error === "object" && error && "status" in error ? Number((error as { status: number }).status) : 0;
     const normalized = normalizeStatus(status, false);
-    return { status: normalized.retryable ? "not_executed" : "ambiguous", text: null, executed: false, fixture: true, billing: normalized.code === "timeout_ambiguous" ? "ambiguous" : "not_sent", normalized };
+    // The injected transport was invoked, so this is not "not sent".
+    return { status: "ambiguous", text: null, executed: false, fixture: true, billing: "ambiguous", normalized };
   }
 }
 
@@ -46,7 +50,7 @@ export function normalizeStatus(status: number, aborted: boolean): NormalizedPro
   if (status === 401) return { code: "unauthorized", retryable: false };
   if (status === 403) return { code: "forbidden", retryable: false };
   if (status === 404) return { code: "not_found", retryable: false };
-  if (status === 408) return { code: "cancelled", retryable: false };
+  if (status === 408) return { code: "timeout_ambiguous", retryable: false };
   if (status === 429) return { code: "rate_limited", retryable: true };
   if (status >= 500) return { code: "unavailable", retryable: true };
   return { code: "schema", retryable: false };

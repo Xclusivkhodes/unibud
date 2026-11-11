@@ -395,7 +395,7 @@ export async function Stress({ userId }: { userId: string }) {
   );
 }
 
-export function Games({ score }: { score?: string; total?: string }) {
+export function Games({ score, total }: { score?: string; total?: string }) {
   return (
     <section className="stack">
       <h1>GameVerse</h1>

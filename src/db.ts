@@ -12,7 +12,15 @@ export function openDatabase(dbPath: string): Db {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(schema);
+  migrateProfiles(db);
   return db;
+}
+
+function migrateProfiles(db: DatabaseSync): void {
+  const names = new Set((db.prepare("PRAGMA table_info(profiles)").all() as Array<{ name: string }>).map((column) => column.name));
+  if (!names.has("age_band")) db.exec("ALTER TABLE profiles ADD COLUMN age_band TEXT");
+  if (!names.has("parent_contact_verified")) db.exec("ALTER TABLE profiles ADD COLUMN parent_contact_verified INTEGER NOT NULL DEFAULT 0");
+  if (!names.has("dev_mailbox_simulated_at")) db.exec("ALTER TABLE profiles ADD COLUMN dev_mailbox_simulated_at TEXT");
 }
 
 function bind(params: unknown[]): SQLInputValue[] {

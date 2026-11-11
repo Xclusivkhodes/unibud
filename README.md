@@ -6,7 +6,7 @@ Founder visual approval for the glass direction and owl rasters is recorded in `
 
 ## Prerequisites verified in this environment
 
-- Node.js v22.23.4 (`node:sqlite` is experimental in this Node line)
+- Node.js `>=22.13 <24` (`package.json` engines). `tests/ledger.test.ts` asserts `process.version` starts with `v22`. Node 24 is outside this branch. `node:sqlite` is experimental in the Node 22 line.
 - npm 10.9.9
 - No database server, container, or API key
 - `ts-fsrs` 6.0.0 requires Node `>=24` and is not installed. Scheduling is the labeled `deterministic-sm2` algorithm.
@@ -26,7 +26,9 @@ npm run dev
 
 ## Environment variable names
 
-See `.env.example`. Values stay empty. Google dispatch remains blocked even if `GEMINI_API_KEY` is present, until age and product policy are resolved. Configured does not mean live-verified. This milestone does not perform paid or live provider calls.
+See `.env.example`. Values stay empty. `GEMINI_API_KEY` and `YOUTUBE_API_KEY` are read only on the server. If either is unset, that integration reports `unconfigured` and does not call out. Google live dispatch stays ineligible until Stephen decides live use, free-tier limits, and under-18 eligibility. Configured does not mean live-verified. This milestone does not perform paid or live provider calls.
+
+Unset `UNIBUD_DB_PATH` uses `.data/unibud.sqlite`. Unset `UNIBUD_UPLOAD_DIR` uses `.data/uploads`. `.data/`, `out/`, and `logs/` are gitignored, as are `*.sqlite`, `*.sqlite3`, `*.db`, and the SQLite journal, wal, and shm suffixes.
 
 ## Baseline
 

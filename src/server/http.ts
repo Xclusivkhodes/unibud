@@ -13,9 +13,27 @@ export function tokenFromRequest(request: Request): string | null {
   return null;
 }
 
+/** Secure unless local HTTP opts out with UNIBUD_COOKIE_INSECURE=1. */
+export function cookieIsSecure(): boolean {
+  return process.env.UNIBUD_COOKIE_INSECURE !== "1";
+}
+
 export function sessionCookie(token: string): string {
-  const secure = process.env.UNIBUD_COOKIE_SECURE === "1" ? "; Secure" : "";
+  const secure = cookieIsSecure() ? "; Secure" : "";
   return `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${14 * 24 * 60 * 60}${secure}`;
+}
+
+export function clearedSessionCookie(): string {
+  const secure = cookieIsSecure() ? "; Secure" : "";
+  return `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure}`;
+}
+
+export function internalErrorHeaders(): Record<string, string> {
+  return {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "private, no-store",
+    pragma: "no-cache",
+  };
 }
 
 export function privateJson(body: unknown, status = 200, extra?: HeadersInit): Response {

@@ -1,3 +1,4 @@
+import { redact } from "../security/redact.js";
 import { assertThumbnailUrl } from "../security/ssrf.js";
 
 /**
@@ -138,31 +139,72 @@ export function buildPlaylistItemsUrl(playlistId: string, apiKey: string, pageTo
   return url;
 }
 
-type MockFetch = (url: string, init: { redirect: "error" }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
+export type MockFetch = (url: string, init: { redirect: "error" }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
+
+/** Audit copy of an outbound URL. The transport still receives the official `key` query. */
+export function auditYouTubeUrl(url: string): string {
+  return redact(url);
+}
+
+function scrubSecret(value: string | null, secret: string): string | null {
+  if (!value || secret.length < 8 || !value.includes(secret)) return value;
+  return value.split(secret).join("[redacted]");
+}
+
+function scrubCard(card: VideoCard, secret: string): VideoCard {
+  return {
+    ...card,
+    title: scrubSecret(card.title, secret),
+    channel: scrubSecret(card.channel, secret),
+    url: scrubSecret(card.url, secret) ?? card.url,
+    thumbnailUrl: scrubSecret(card.thumbnailUrl, secret),
+  };
+}
 
 export async function runMockedSearch(options: { apiKey: string; query: string; fetchImpl: MockFetch }): Promise<SearchResult & { requested: string[] }> {
-  const requested: string[] = [];
+  const outbound: string[] = [];
   const searchUrl = buildSearchListUrl(options.query, options.apiKey);
-  requested.push(searchUrl.toString());
+  outbound.push(searchUrl.toString());
   const searchResponse = await options.fetchImpl(searchUrl.toString(), { redirect: "error" });
   const search = (await searchResponse.json()) as { items?: Record<string, unknown>[] };
   const ids = (search.items ?? []).map((item) => (item.id as { videoId?: string } | undefined)?.videoId).filter((id): id is string => Boolean(id));
   const videosUrl = buildVideosListUrl(ids, options.apiKey);
-  requested.push(videosUrl.toString());
+  outbound.push(videosUrl.toString());
   const videosResponse = await options.fetchImpl(videosUrl.toString(), { redirect: "error" });
   const videos = (await videosResponse.json()) as { items?: Record<string, unknown>[] };
   const byId = new Map((videos.items ?? []).map((video) => [String(video.id), video]));
-  const cards = (search.items ?? []).map((item) => cardFromParts(item, byId.get(String((item.id as { videoId?: string }).videoId)) ?? null)).filter((card): card is VideoCard => card !== null);
-  return { status: "ok", cards, quota: quotaForSearchAndHydrate(), fixture: true, requested };
+  const cards = (search.items ?? [])
+    .map((item) => cardFromParts(item, byId.get(String((item.id as { videoId?: string }).videoId)) ?? null))
+    .filter((card): card is VideoCard => card !== null)
+    .map((card) => scrubCard(card, options.apiKey));
+  return { status: "ok", cards, quota: quotaForSearchAndHydrate(), fixture: true, requested: outbound.map(auditYouTubeUrl) };
 }
 
 export async function runMockedPlaylist(options: { apiKey: string; playlistId: string; fetchImpl: MockFetch }): Promise<ReturnType<typeof playlistView> & { requested: string[] }> {
-  const requested = [buildPlaylistListUrl(options.playlistId, options.apiKey).toString(), buildPlaylistItemsUrl(options.playlistId, options.apiKey).toString()];
-  const playlistResponse = await options.fetchImpl(requested[0], { redirect: "error" });
+  const outbound = [buildPlaylistListUrl(options.playlistId, options.apiKey).toString(), buildPlaylistItemsUrl(options.playlistId, options.apiKey).toString()];
+  const playlistResponse = await options.fetchImpl(outbound[0], { redirect: "error" });
   const playlistJson = (await playlistResponse.json()) as { items?: Array<{ contentDetails?: { itemCount?: number } }> };
-  const itemsResponse = await options.fetchImpl(requested[1], { redirect: "error" });
+  const itemsResponse = await options.fetchImpl(outbound[1], { redirect: "error" });
   const itemsJson = (await itemsResponse.json()) as { items?: Array<{ contentDetails?: { videoId?: string } }> };
-  return { ...playlistView(playlistJson.items?.[0] ?? {}, itemsJson.items ?? []), requested };
+  return { ...playlistView(playlistJson.items?.[0] ?? {}, itemsJson.items ?? []), requested: outbound.map(auditYouTubeUrl) };
+}
+
+export function youtubeApiKey(): string | undefined {
+  const value = process.env.YOUTUBE_API_KEY?.trim();
+  return value ? value : undefined;
+}
+
+/** Server entry. Reads YOUTUBE_API_KEY from the environment and never returns that value. */
+export async function searchFromServerEnv(options: {
+  query: string;
+  online?: boolean;
+  transport?: MockFetch;
+}): Promise<SearchResult & { requested?: string[] }> {
+  if (options.online === false) return { status: "offline" };
+  const apiKey = youtubeApiKey();
+  if (!apiKey) return { status: "unconfigured" };
+  if (!options.transport) return { status: "not_executed", reason: "live_youtube_call_not_authorized" };
+  return runMockedSearch({ apiKey, query: options.query, fetchImpl: options.transport });
 }
 
 export async function searchVideos(options: {
@@ -180,6 +222,7 @@ export async function searchVideos(options: {
   const byId = new Map(options.fixture.videos.map((video) => [String(video.id), video]));
   const cards = items
     .map((item) => cardFromParts(item, byId.get(String((item.id as { videoId?: string }).videoId)) ?? null))
-    .filter((card): card is VideoCard => card !== null);
+    .filter((card): card is VideoCard => card !== null)
+    .map((card) => scrubCard(card, options.apiKey ?? ""));
   return { status: "ok", cards, quota: quotaForSearchAndHydrate(), fixture: true };
 }
