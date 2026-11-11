@@ -44,6 +44,7 @@ import {
   pauseSession,
   postToCircle,
   proposeAutopilot,
+  profileClaimsFor,
   proposeCram,
   registerUser,
   renameChat,
@@ -59,6 +60,7 @@ import {
 } from "../domain.js";
 import { projectile, scoreBuiltInGame } from "../learning/labs.js";
 import { planRoute, type RouteInput } from "../providers/registry.js";
+import { readProfileClaims } from "../server/account-policy.js";
 import { AppError, newId } from "../security/crypto.js";
 import { inspectUpload } from "../security/uploads.js";
 import { DeviceStore } from "../device/store.js";
@@ -207,11 +209,12 @@ export async function askAction(formData: FormData) {
   const user = await requireUser();
   const courseId = String(formData.get("courseId") || "") || undefined;
   const chatId = String(formData.get("chatId") || "") || createChat(getAppDb(), user.id, String(formData.get("title") ?? "Study question"), courseId);
+  const claims = readProfileClaims(profileClaimsFor(getAppDb(), user.id));
   const route: RouteInput = {
     task: "tutoring",
     required: ["text"],
     sensitivity: "ordinary",
-    audience: "unknown",
+    audience: claims.age_band === "18_plus" && claims.education_level === "university" ? "adults_not_directed_at_minors" : "under18_directed_or_likely",
     billingTier: "unknown",
     grants: all<{ provider: string }>(getAppDb(), "SELECT provider FROM privacy_grants WHERE user_id = ?", user.id).map((row) => row.provider),
     retention: "strict",
@@ -220,6 +223,8 @@ export async function askAction(formData: FormData) {
     independentCheck: false,
     online: true,
     configuredProviders: [],
+    ageBand: claims.age_band,
+    educationLevel: claims.education_level,
   };
   askTutor(getAppDb(), user.id, chatId, String(formData.get("question") ?? ""), route);
   redirect(`/companion?chat=${chatId}`);

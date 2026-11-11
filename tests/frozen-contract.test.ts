@@ -5,7 +5,7 @@ import { afterEach, expect, test } from "vitest";
 import type { MeResponse } from "../src/contract/types.js";
 import { openDatabase, run, type Db } from "../src/db.js";
 import { recordDevMailboxSimulation, registerUser } from "../src/domain.js";
-import { GOOGLE_APP_BLOCK_REASON, REGISTRY, fallbackAfter, planRoute, type RouteDecision, type RouteInput } from "../src/providers/registry.js";
+import { GOOGLE_APP_BLOCK_REASON, LEARNER_PROVIDER_BLOCK, REGISTRY, fallbackAfter, planRoute, type RouteDecision, type RouteInput } from "../src/providers/registry.js";
 import { setChatTransportForTests } from "../src/providers/chat.js";
 import { passwordWorkCountSnapshot, resetPasswordWorkCount } from "../src/security/crypto.js";
 import { handleApi } from "../src/server/api.js";
@@ -18,6 +18,7 @@ afterEach(() => {
   resetInflightForTests();
   setChatTransportForTests(null);
   delete process.env.GEMINI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
 });
 
 function db(): Db {
@@ -136,6 +137,27 @@ test("adult accounts cannot dispatch Gemini even with a key, including fallback"
   expect(fallbackAfter(googleFallback, "transient", adultRoute())).toBeNull();
 });
 
+test("under_13, 13_17, junior high, and senior high deny every provider including paid fallback", () => {
+  const openai = REGISTRY.find((entry) => entry.provider === "openai");
+  const cases: Array<Pick<RouteInput, "ageBand" | "educationLevel">> = [
+    { ageBand: "under_13", educationLevel: "university" },
+    { ageBand: "13_17", educationLevel: "university" },
+    { ageBand: "18_plus", educationLevel: "junior_high" },
+    { ageBand: "18_plus", educationLevel: "senior_high" },
+    { ageBand: null, educationLevel: "university" },
+  ];
+  for (const claims of cases) {
+    const input = adultRoute({ ...claims, allowPaidProviders: true, configuredProviders: ["openai", "google"], grants: ["openai", "google"], billingTier: "paid" });
+    const plan = planRoute(input);
+    expect(plan.status).toBe("unavailable");
+    expect(plan.primary).toBeUndefined();
+    expect(plan.blocked.length).toBeGreaterThan(0);
+    expect(plan.blocked.every((item) => item.reason.includes(LEARNER_PROVIDER_BLOCK))).toBe(true);
+    const forced: RouteDecision = { status: "selected", fallback: openai, reason: "fixture", blocked: [], liveVerified: false, executed: false };
+    expect(fallbackAfter(forced, "transient", input)).toBeNull();
+  }
+});
+
 test("school level does not unlock Gemini and under_13 circle stays blocked after a mailbox simulation", async () => {
   const database = db();
   const jhs = await register(database, "jhs@example.edu", "junior_high", "18_plus");
@@ -155,13 +177,34 @@ test("school level does not unlock Gemini and under_13 circle stays blocked afte
   const invite = await call(database, "POST", `/api/circles/${circleId}/invites`, { email: "jhs@example.edu" }, shs.cookie);
   expect(invite.status).toBe(403);
   expect(await invite.json()).toEqual({ error: "circle_sharing_restricted" });
+  process.env.OPENAI_API_KEY = "dummy-openai-key";
+  let calls = 0;
+  setChatTransportForTests(async () => {
+    calls += 1;
+    return { status: 200, body: { choices: [{ message: { content: "should not run" } }] } };
+  });
+  const chatId = ((await (await call(database, "POST", "/api/chats", { title: "Q" }, jhs.cookie)).json()) as { id: string }).id;
+  const asked = await (await call(database, "POST", `/api/chats/${chatId}/messages`, { question: "synthetic prompt only" }, jhs.cookie)).json() as { providerTurn: { text: string | null }; plan: { blocked: Array<{ reason: string }> } };
+  expect(calls).toBe(0);
+  expect(asked.providerTurn.text).toBeNull();
+  expect(asked.plan.blocked.every((item) => item.reason.includes(LEARNER_PROVIDER_BLOCK))).toBe(true);
+  expect(JSON.stringify(asked)).not.toContain("dummy-openai-key");
+  delete process.env.OPENAI_API_KEY;
 });
 
 test("login failures lock an account and a source separately, then expire", async () => {
   const database = db();
   await register(database, "one@example.edu", "university", "18_plus");
   await register(database, "two@example.edu", "university", "18_plus");
+  await register(database, "rotate@example.edu", "university", "18_plus");
   const start = 1_700_000_000_000;
+  resetPasswordWorkCount();
+  expect((await call(database, "POST", "/api/auth/login", { email: "missing@example.edu", password: "wrong-password" }, undefined, "203.0.113.1", start)).status).toBe(401);
+  const missingWork = passwordWorkCountSnapshot();
+  resetPasswordWorkCount();
+  expect((await call(database, "POST", "/api/auth/login", { email: "one@example.edu", password: "wrong-password" }, undefined, "203.0.113.1", start)).status).toBe(401);
+  expect(passwordWorkCountSnapshot()).toBe(missingWork);
+  resetInflightForTests();
   for (let attempt = 0; attempt < LOGIN_LOCK_AFTER; attempt += 1) {
     const response = await call(database, "POST", "/api/auth/login", { email: "one@example.edu", password: "wrong-password" }, undefined, "203.0.113.8", start + attempt);
     expect(response.status).toBe(401);
@@ -178,9 +221,15 @@ test("login failures lock an account and a source separately, then expire", asyn
   expect(sourceLocked.status).toBe(429);
   const afterExpiry = await call(database, "POST", "/api/auth/login", { email: "one@example.edu", password: "password123" }, undefined, "203.0.113.9", start + LOGIN_LOCK_MS + 50);
   expect(afterExpiry.status).toBe(200);
+  for (let attempt = 0; attempt < LOGIN_LOCK_AFTER; attempt += 1) {
+    const rotated = await call(database, "POST", "/api/auth/login", { email: "rotate@example.edu", password: "wrong-password" }, undefined, `198.51.100.${attempt + 1}`, start + 5_000 + attempt);
+    expect(rotated.status).toBe(401);
+  }
+  const accountFollowsRotation = await call(database, "POST", "/api/auth/login", { email: "rotate@example.edu", password: "password123" }, undefined, "203.0.113.250", start + 6_000);
+  expect(accountFollowsRotation.status).toBe(429);
   resetInflightForTests();
   for (let index = 0; index < MAX_FAILURE_KEYS + 5; index += 1) recordLoginFailure(`acct-${index}@example.edu`, "203.0.113.1", start);
-  expect(failureKeyCount()).toBeLessThanOrEqual(MAX_FAILURE_KEYS * 2);
+  expect(failureKeyCount()).toBe(MAX_FAILURE_KEYS + 1);
 });
 
 test("invite responses match and do the same password work, and course_fit ignores YouTube statistics", async () => {

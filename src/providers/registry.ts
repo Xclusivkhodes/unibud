@@ -167,7 +167,19 @@ export type RouteInput = {
   configuredProviders: ProviderId[];
   /** Test-only. Production routes leave this unset, so OpenAI, Anthropic, and xAI stay ineligible. */
   allowPaidProviders?: boolean;
+  ageBand?: "under_13" | "13_17" | "18_plus" | null;
+  educationLevel?: "university" | "senior_high" | "junior_high" | null;
 };
+
+/** No provider is approved for these accounts until Stephen approves one and its cost. */
+export const LEARNER_PROVIDER_BLOCK = "learner_provider_not_approved" as const;
+
+export function learnerProviderBlock(input: Pick<RouteInput, "ageBand" | "educationLevel">): string | null {
+  if (input.ageBand === undefined && input.educationLevel === undefined) return null;
+  if (input.ageBand === "under_13" || input.ageBand === "13_17" || input.ageBand === null) return LEARNER_PROVIDER_BLOCK;
+  if (input.educationLevel === "junior_high" || input.educationLevel === "senior_high") return LEARNER_PROVIDER_BLOCK;
+  return null;
+}
 
 export type RouteDecision = {
   status: "selected" | "unavailable";
@@ -195,12 +207,15 @@ export function trainingBlock(entry: RegistryEntry): string | null {
 }
 
 export function entryBlock(entry: RegistryEntry, input: RouteInput): string | null {
+  const learner = learnerProviderBlock(input);
   if (entry.provider === "google") {
     const reasons = googlePolicyFailures(input);
+    if (learner) reasons.unshift(learner);
     const training = trainingBlock(entry);
     if (training) reasons.push(training);
     return reasons.join(",");
   }
+  if (learner) return learner;
   const training = trainingBlock(entry);
   if (training) return training;
   if ((entry.provider === "openai" || entry.provider === "anthropic" || entry.provider === "xai") && input.allowPaidProviders !== true) return "paid_provider_not_enabled";

@@ -17,9 +17,11 @@ import {
   renameChat,
   reviewCard,
   saveGame,
+  profileClaimsFor,
   saveLab,
   startSession,
 } from "../domain.js";
+import { readProfileClaims } from "./account-policy.js";
 import { projectile, scoreBuiltInGame } from "../learning/labs.js";
 import { configuredProviderIds, runChatProvider, unconfiguredTurn } from "../providers/chat.js";
 import { AppError, newId, nowIso } from "../security/crypto.js";
@@ -124,11 +126,13 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
     const chatId = decodeURIComponent(messages[1]);
     return once(db, userId, str(body.idempotencyKey), async () => {
     const configured = configuredProviderIds();
+    const claims = readProfileClaims(profileClaimsFor(db, userId));
+    const audience = claims.age_band === "18_plus" && claims.education_level === "university" ? "adults_not_directed_at_minors" as const : "under18_directed_or_likely" as const;
     const stored = askTutor(db, userId, chatId, str(body.question), {
       task: "tutoring",
       required: ["text"],
       sensitivity: "unknown",
-      audience: "unknown",
+      audience,
       billingTier: "unknown",
       grants: [],
       retention: "strict",
@@ -137,8 +141,14 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
       independentCheck: false,
       online: true,
       configuredProviders: configured,
+      ageBand: claims.age_band,
+      educationLevel: claims.education_level,
     });
-    const providerTurn = configured.length === 0 ? unconfiguredTurn() : await runChatProvider({ prompt: str(body.question), signal: request.signal });
+    const providerTurn = configured.length === 0 ? unconfiguredTurn() : await runChatProvider({
+      prompt: str(body.question),
+      signal: request.signal,
+      route: { audience, ageBand: claims.age_band, educationLevel: claims.education_level },
+    });
     return json({ ...stored, providerTurn });
     });
   }
