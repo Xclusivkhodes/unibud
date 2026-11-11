@@ -33,6 +33,8 @@ The frontend should call HTTP only. Do not import `src/db.ts`, `src/domain.ts`, 
 
 Shared response names live in `src/contract/types.ts`.
 
+Frozen signup, for the register page this branch does not edit: POST `/api/auth/register` now requires `education_level` (`university` | `senior_high` | `junior_high`) and `age_band` (`under_13` | `13_17` | `18_plus`). This is a breaking request change. Do not send a date of birth. GET `/api/me` adds `education_level`, `age_band`, `account_status`, `ai_available`, and `needs_profile_completion`. `ai_available` is false for every current account because Gemini is blocked for the whole app. Legacy profiles come back with null claims and `needs_profile_completion: true`; complete them with POST `/api/profile/completion`.
+
 ## Auth cookie and CSRF
 
 - Cookie name: `unibud_session`

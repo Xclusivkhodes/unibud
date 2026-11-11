@@ -2,6 +2,7 @@ import { rmSync } from "node:fs";
 import path from "node:path";
 import { AppError, hashPassword, localDate, newId, newSessionToken, nowIso, recordedMinutes, sha256, shiftDate, studyStreak, verifyPassword } from "./security/crypto.js";
 import { deviceRoot, uploadRoot } from "./server/paths.js";
+import { parseAgeBand, parseEducationLevel, type AgeBand, type EducationLevel, type ProfileClaims } from "./server/account-policy.js";
 import { all, get, run, transaction, type Db } from "./db.js";
 import { planRoute, type RouteInput } from "./providers/registry.js";
 import { reviewSm2, SCHEDULER_ID } from "./learning/scheduler.js";
@@ -34,24 +35,46 @@ function notify(db: Db, userId: string, kind: string, title: string, body: strin
   );
 }
 
-export function registerUser(db: Db, input: { email: string; password: string; dataClass?: "learner" | "test_fixture" }): { id: string; email: string } {
+export function registerUser(db: Db, input: { email: string; password: string; dataClass?: "learner" | "test_fixture"; educationLevel?: string; ageBand?: string }): { id: string; email: string; education_level: EducationLevel | null; age_band: AgeBand | null } {
   const email = input.email.trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new AppError("invalid_email", "Email was rejected.");
   if (input.password.length < 10) throw new AppError("weak_password", "Password was rejected.");
   if (get(db, "SELECT id FROM users WHERE email = ?", email)) throw new AppError("email_taken", "Email is already registered.");
+  const education_level = input.educationLevel ? parseEducationLevel(input.educationLevel) : null;
+  const age_band = input.ageBand ? parseAgeBand(input.ageBand) : null;
   const id = newId();
   const at = nowIso();
   transaction(db, () => {
     run(db, "INSERT INTO users (id, email, password_hash, data_class, created_at) VALUES (?, ?, ?, ?, ?)", id, email, hashPassword(input.password), input.dataClass ?? "learner", at);
-    run(db, "INSERT INTO profiles (user_id, updated_at) VALUES (?, ?)", id, at);
+    run(db, "INSERT INTO profiles (user_id, education_level, age_band, updated_at) VALUES (?, ?, ?, ?)", id, education_level, age_band, at);
     run(db, "INSERT INTO ai_settings (user_id, updated_at) VALUES (?, ?)", id, at);
   });
-  return { id, email };
+  return { id, email, education_level, age_band };
 }
+
+export function profileClaimsFor(db: Db, userId: string): { education_level: string | null; age_band: string | null } {
+  return get<{ education_level: string | null; age_band: string | null }>(db, "SELECT education_level, age_band FROM profiles WHERE user_id = ?", userId) ?? { education_level: null, age_band: null };
+}
+
+export function completeProfile(db: Db, userId: string, input: { educationLevel: string; ageBand: string }): ProfileClaims {
+  must(get(db, "SELECT id FROM users WHERE id = ?", userId));
+  const education_level = parseEducationLevel(input.educationLevel);
+  const age_band = parseAgeBand(input.ageBand);
+  run(db, "UPDATE profiles SET education_level = ?, age_band = ?, updated_at = ?, rev = rev + 1 WHERE user_id = ?", education_level, age_band, nowIso(), userId);
+  return { education_level, age_band };
+}
+
+export function recordDevMailboxSimulation(db: Db, userId: string, at = nowIso()): void {
+  must(get(db, "SELECT id FROM users WHERE id = ?", userId));
+  run(db, "UPDATE profiles SET dev_mailbox_simulated_at = ? WHERE user_id = ?", at, userId);
+}
+
+const LOGIN_TIMING_HASH = hashPassword("unibud-login-timing");
 
 export function login(db: Db, email: string, password: string, at = nowIso()): { token: string; userId: string } {
   const user = get<{ id: string; password_hash: string }>(db, "SELECT id, password_hash FROM users WHERE email = ?", email.trim().toLowerCase());
-  if (!user || !verifyPassword(password, user.password_hash)) throw new AppError("invalid_login", "Login was rejected.", 401);
+  const passwordMatches = verifyPassword(password, user?.password_hash ?? LOGIN_TIMING_HASH);
+  if (!user || !passwordMatches) throw new AppError("invalid_login", "Login was rejected.", 401);
   const token = newSessionToken();
   const expires = new Date(new Date(at).getTime() + 14 * 24 * 60 * 60 * 1000).toISOString();
   run(db, "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)", sha256(token), user.id, at, expires);
@@ -654,11 +677,9 @@ export function createCircle(db: Db, ownerId: string, name: string) {
 
 export function inviteToCircle(db: Db, ownerId: string, circleId: string, email: string) {
   const circle = must(get<{ id: string }>(db, "SELECT id FROM circles WHERE id = ? AND owner_id = ?", circleId, ownerId));
+  hashPassword("invite-timing");
   const user = get<{ id: string }>(db, "SELECT id FROM users WHERE email = ?", email.trim().toLowerCase());
-  if (!user) {
-    hashPassword("invite-timing");
-    return { status: "pending" as const };
-  }
+  if (!user) return { status: "pending" as const };
   run(db, "INSERT OR REPLACE INTO circle_members (circle_id, user_id, role, status, revoked_at, created_at) VALUES (?, ?, 'member', 'pending', NULL, ?)", circle.id, user.id, nowIso());
   notify(db, user.id, "circle_invite", "Study circle invite", "Accept the invite on the server before any shared read.", `invite:${circleId}:${user.id}`);
   return { status: "pending" as const };

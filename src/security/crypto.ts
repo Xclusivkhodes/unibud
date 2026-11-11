@@ -12,13 +12,25 @@ export function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+let passwordWorkCount = 0;
+
+export function resetPasswordWorkCount(): void {
+  passwordWorkCount = 0;
+}
+
+export function passwordWorkCountSnapshot(): number {
+  return passwordWorkCount;
+}
+
 export function hashPassword(password: string): string {
+  passwordWorkCount += 1;
   const salt = randomBytes(16).toString("hex");
   const hash = scryptSync(password, salt, 32).toString("hex");
   return `scrypt$${salt}$${hash}`;
 }
 
 export function verifyPassword(password: string, stored: string): boolean {
+  passwordWorkCount += 1;
   const [scheme, salt, hash] = stored.split("$");
   if (scheme !== "scrypt" || !salt || !hash) return false;
   const actual = scryptSync(password, salt, 32);

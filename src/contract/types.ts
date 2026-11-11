@@ -8,6 +8,24 @@ export type PreviewErrorCode = "preview_required" | "preview_not_found" | "previ
 
 export type SessionUser = { id: string; email: string; dataClass: string };
 
+export type EducationLevel = "university" | "senior_high" | "junior_high";
+export type AgeBand = "under_13" | "13_17" | "18_plus";
+export type AccountStatus = "active" | "pending_parental_consent";
+
+/** Frozen /api/me shape. Null claims mean the profile is unfinished, not an assumed level or band. */
+export type MeResponse = {
+  id: string;
+  email: string;
+  dataClass: string;
+  education_level: EducationLevel | null;
+  age_band: AgeBand | null;
+  account_status: AccountStatus;
+  ai_available: boolean;
+  needs_profile_completion: boolean;
+};
+
+export type CourseFit = { score: number; signals: string[] };
+
 /** GET /api/courses and GET /api/courses/:id. Snake_case columns, not the full row. */
 export type CourseSummary = {
   id: string;

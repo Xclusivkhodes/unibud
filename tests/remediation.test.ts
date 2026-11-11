@@ -53,10 +53,15 @@ function db(): Db {
   return openDatabase(file);
 }
 
+function withSignup(pathname: string, body?: unknown): unknown {
+  if (pathname !== "/api/auth/register" || !body || typeof body !== "object" || Array.isArray(body)) return body;
+  return { education_level: "university", age_band: "18_plus", ...(body as Record<string, unknown>) };
+}
+
 function call(database: Db, method: string, pathname: string, body?: unknown, cookie?: string, source = "198.51.100.10") {
   const headers = new Headers({ host: "127.0.0.1:3000", "x-unibud-request": "1" });
   if (cookie) headers.set("cookie", cookie);
-  return handleApi(new Request(`http://127.0.0.1:3000${pathname}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), database, { source });
+  return handleApi(new Request(`http://127.0.0.1:3000${pathname}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(withSignup(pathname, body)) }), database, { source });
 }
 
 function cookieFrom(response: Response): string {
@@ -258,7 +263,9 @@ test("training policy blocks unpaid or unknown models and fallback rechecks elig
     independentCheck: false,
     online: true,
     configuredProviders: ["openai"],
+    allowPaidProviders: true,
   };
+  expect(planRoute({ ...input, allowPaidProviders: false }, [allowed]).status).toBe("unavailable");
   const denied = planRoute(input, [unknown, allowed]);
   expect(denied.primary?.model).toBe("synthetic-allowed");
   expect(denied.blocked.some((item) => item.reason === "training_unpaid_or_unknown_denied")).toBe(true);
@@ -279,7 +286,7 @@ test("gemini and chat fail closed without server keys and do not echo a dummy ke
   const cookie = cookieFrom(await call(database, "POST", "/api/auth/register", { email: "gem@example.edu", password: "password123" }));
   const providers = await call(database, "GET", "/api/providers", undefined, cookie);
   const body = (await providers.json()) as { providers: Array<{ provider: string; configured: boolean; blockReason: string | null }> };
-  expect(body.providers.filter((item) => item.provider === "google").every((item) => item.configured === false && item.blockReason === "unconfigured")).toBe(true);
+  expect(body.providers.filter((item) => item.provider === "google").every((item) => item.configured === false && (item.blockReason ?? "").includes("unconfigured") && (item.blockReason ?? "").includes("google_api_client_directed_at_or_likely_accessed_by_under_18"))).toBe(true);
   const chatId = ((await (await call(database, "POST", "/api/chats", { title: "Q" }, cookie)).json()) as { id: string }).id;
   const asked = await call(database, "POST", `/api/chats/${chatId}/messages`, { question: "What is pH?" }, cookie);
   const askedBody = (await asked.json()) as { providerTurn: { status: string; text: string | null } };
@@ -288,7 +295,7 @@ test("gemini and chat fail closed without server keys and do not echo a dummy ke
   const held = await runChatProvider({
     prompt: "explain",
     grants: ["openai"],
-    route: { retention: "vendor_default_allowed", sensitivity: "ordinary", audience: "adults_not_directed_at_minors", billingTier: "paid" },
+    route: { retention: "vendor_default_allowed", sensitivity: "ordinary", audience: "adults_not_directed_at_minors", billingTier: "paid", allowPaidProviders: true },
     catalog: [{
       provider: "openai",
       model: "synthetic-allowed",

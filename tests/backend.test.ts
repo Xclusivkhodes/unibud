@@ -134,7 +134,7 @@ test("google stays ineligible and unknown age is an additional denial", () => {
   const plan = planRoute(baseRoute());
   expect(plan.status).toBe("unavailable");
   expect(plan.executed).toBe(false);
-  expect(plan.blocked.some((item) => item.provider === "google" && item.reason.includes("google_live_blocked_pending_age_and_product_policy"))).toBe(true);
+  expect(plan.blocked.some((item) => item.provider === "google" && item.reason.includes("google_api_client_directed_at_or_likely_accessed_by_under_18"))).toBe(true);
   expect(plan.blocked.some((item) => item.reason.includes("google_age_terms_unknown_or_under18_denied"))).toBe(true);
   expect(plan.blocked.some((item) => item.reason.includes("google_sensitive_or_unknown_denied"))).toBe(false);
 });
@@ -155,6 +155,7 @@ test("synthetic eligible providers select without ranking and do not execute", (
       independentCheck: true,
       preferredProvider: "anthropic",
       preferredModel: "synthetic-b",
+      allowPaidProviders: true,
     }),
     synthetic,
   );

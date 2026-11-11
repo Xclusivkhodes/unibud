@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   legal_name TEXT NOT NULL DEFAULT '',
   display_name TEXT NOT NULL DEFAULT '',
-  education_level TEXT NOT NULL DEFAULT '',
+  education_level TEXT,
   institution TEXT NOT NULL DEFAULT '',
   explanation_depth TEXT NOT NULL DEFAULT 'intermediate',
   formats_json TEXT NOT NULL DEFAULT '[]',
@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS profiles (
   exam_syllabus_text TEXT NOT NULL DEFAULT '',
   timezone TEXT NOT NULL DEFAULT 'UTC',
   onboarding_status TEXT NOT NULL DEFAULT 'pending',
+  age_band TEXT,
+  parent_contact_verified INTEGER NOT NULL DEFAULT 0,
+  dev_mailbox_simulated_at TEXT,
   updated_at TEXT NOT NULL,
   rev INTEGER NOT NULL DEFAULT 1
 );

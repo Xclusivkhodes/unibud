@@ -34,10 +34,15 @@ function db(): Db {
   return openDatabase(file);
 }
 
+function withSignup(pathname: string, body?: unknown): unknown {
+  if (pathname !== "/api/auth/register" || !body || typeof body !== "object" || Array.isArray(body)) return body;
+  return { education_level: "university", age_band: "18_plus", ...(body as Record<string, unknown>) };
+}
+
 function call(database: Db, method: string, pathname: string, body?: unknown, cookie?: string) {
   const headers = new Headers({ host: "127.0.0.1:3000", "x-unibud-request": "1" });
   if (cookie) headers.set("cookie", cookie);
-  return handleApi(new Request(`http://127.0.0.1:3000${pathname}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), database);
+  return handleApi(new Request(`http://127.0.0.1:3000${pathname}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(withSignup(pathname, body)) }), database);
 }
 
 function cookieFrom(response: Response): string {

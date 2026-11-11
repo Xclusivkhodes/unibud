@@ -5,7 +5,15 @@
  * example payloads are not copied in as limits.
  */
 
-export const GOOGLE_LIVE_USE = "blocked_pending_age_and_product_policy" as const;
+/**
+ * Gemini API Additional Terms, effective 23 March 2026:
+ * https://aistudio.google.com/docs/terms
+ * An API client directed toward, or likely accessed by, under-18s may not use the Services.
+ * UniBud includes junior high and senior high, so this block is app-wide.
+ * A key, an adult claim, and the free tier are not clearance. Teammate model reports are not this finding.
+ */
+export const GOOGLE_APP_BLOCK_REASON = "google_api_client_directed_at_or_likely_accessed_by_under_18" as const;
+export const GOOGLE_LIVE_USE = "blocked_app_likely_accessed_by_under_18" as const;
 
 /**
  * Gemma 4 ids named by https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api.
@@ -157,6 +165,8 @@ export type RouteInput = {
   independentCheck: boolean;
   online: boolean;
   configuredProviders: ProviderId[];
+  /** Test-only. Production routes leave this unset, so OpenAI, Anthropic, and xAI stay ineligible. */
+  allowPaidProviders?: boolean;
 };
 
 export type RouteDecision = {
@@ -171,8 +181,8 @@ export type RouteDecision = {
 };
 
 export function googlePolicyFailures(input: RouteInput): string[] {
-  const reasons = ["google_live_blocked_pending_age_and_product_policy"];
-  if (GOOGLE_LIVE_USE !== "blocked_pending_age_and_product_policy") reasons.push("google_policy_flag_unexpected");
+  const reasons: string[] = [GOOGLE_APP_BLOCK_REASON];
+  if (GOOGLE_LIVE_USE !== "blocked_app_likely_accessed_by_under_18") reasons.push("google_policy_flag_unexpected");
   if (input.audience !== "adults_not_directed_at_minors") reasons.push("google_age_terms_unknown_or_under18_denied");
   if (input.sensitivity !== "ordinary") reasons.push("google_sensitive_or_unknown_denied");
   if (input.billingTier !== "paid") reasons.push("google_unpaid_or_unknown_tier_denied");
@@ -193,6 +203,7 @@ export function entryBlock(entry: RegistryEntry, input: RouteInput): string | nu
   }
   const training = trainingBlock(entry);
   if (training) return training;
+  if ((entry.provider === "openai" || entry.provider === "anthropic" || entry.provider === "xai") && input.allowPaidProviders !== true) return "paid_provider_not_enabled";
   if (!input.configuredProviders.includes(entry.provider)) return "unconfigured";
   if (!input.grants.includes(entry.provider)) return "privacy_grant_missing";
   if (input.retention === "strict") return "retention_unknown_or_not_strict_denied";

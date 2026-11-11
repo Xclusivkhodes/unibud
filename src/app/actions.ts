@@ -76,7 +76,11 @@ export async function registerAction(formData: FormData) {
   const password = String(formData.get("password") ?? "");
   const displayName = String(formData.get("displayName") ?? "").trim();
   try {
-    const user = registerUser(getAppDb(), { email, password });
+    const educationLevel = String(formData.get("education_level") ?? "");
+    const ageBand = String(formData.get("age_band") ?? "");
+    if (!educationLevel) throw new AppError("invalid_education_level", "Education level was rejected.", 400);
+    if (!ageBand) throw new AppError("invalid_age_band", "Age band was rejected.", 400);
+    const user = registerUser(getAppDb(), { email, password, educationLevel, ageBand });
     if (displayName) saveProfile(getAppDb(), user.id, { display_name: displayName, onboarding_status: "completed" }, 1);
     const session = login(getAppDb(), email, password);
     await setSession(session.token);

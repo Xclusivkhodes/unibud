@@ -22,7 +22,10 @@ import {
   logout,
   postToCircle,
   readPosts,
+  completeProfile,
+  profileClaimsFor,
   registerUser,
+  recordDevMailboxSimulation,
   revokeMember,
   saveProfile,
   startAttempt,
@@ -36,7 +39,8 @@ import { AppError } from "../security/crypto.js";
 import { captionDownloadStatus } from "../youtube/api.js";
 import { readLimitedJson } from "./body.js";
 import { clearedSessionCookie, sessionCookie, tokenFromRequest } from "./http.js";
-import { assertBodyBudget, inflightKey, reserveInflight } from "./limits.js";
+import { accountCapabilities, assertCircleAllowed } from "./account-policy.js";
+import { assertBodyBudget, assertLoginAllowed, clearLoginFailures, inflightKey, recordLoginFailure, reserveInflight, trustedRequestSource } from "./limits.js";
 import { handleOwnedResources } from "./resources.js";
 
 function json(body: unknown, status = 200, extra?: HeadersInit): Response {
@@ -98,16 +102,31 @@ function providerStatus(input: RouteInput): ProviderPublicStatus[] {
       eligible: false,
       liveVerified: false,
       operational: false,
-      blockReason: configured ? policy ?? "not_live_authorized" : "unconfigured",
+      blockReason: [configured ? null : "unconfigured", policy ?? (configured ? "not_live_authorized" : null)].filter(Boolean).join(",") || "not_live_authorized",
     };
   });
 }
 
-export async function handleApi(request: Request, db: Db, options?: { source?: string }): Promise<Response> {
+function meBody(db: Db, actor: { id: string; email: string; data_class: string }) {
+  const capabilities = accountCapabilities(profileClaimsFor(db, actor.id));
+  return {
+    id: actor.id,
+    email: actor.email,
+    dataClass: actor.data_class,
+    education_level: capabilities.education_level,
+    age_band: capabilities.age_band,
+    account_status: capabilities.account_status,
+    ai_available: capabilities.ai_available,
+    needs_profile_completion: capabilities.needs_profile_completion,
+  };
+}
+
+export async function handleApi(request: Request, db: Db, options?: { source?: string; now?: number }): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/$/, "") || "/";
   const method = request.method.toUpperCase();
-  const source = options?.source?.trim() || "local";
+  const source = trustedRequestSource(options?.source);
+  const now = options?.now ?? Date.now();
   let release = () => {};
   try {
     assertBodyBudget(request);
@@ -116,13 +135,23 @@ export async function handleApi(request: Request, db: Db, options?: { source?: s
       const body = await readJson(request);
       release = reserveInflight(inflightKey({ email: str(body.email), source }));
       if (path === "/api/auth/register") {
-        const created = registerUser(db, { email: str(body.email), password: str(body.password) });
+        if (!str(body.education_level)) throw new AppError("invalid_education_level", "Education level was rejected.", 400);
+        if (!str(body.age_band)) throw new AppError("invalid_age_band", "Age band was rejected.", 400);
+        const created = registerUser(db, { email: str(body.email), password: str(body.password), educationLevel: str(body.education_level), ageBand: str(body.age_band) });
         if (str(body.displayName)) saveProfile(db, created.id, { display_name: str(body.displayName), onboarding_status: "completed" }, 1);
         const session = login(db, created.email, str(body.password));
-        return json({ userId: created.id }, 201, { "set-cookie": sessionCookie(session.token) });
+        return json({ userId: created.id, education_level: created.education_level, age_band: created.age_band }, 201, { "set-cookie": sessionCookie(session.token) });
       }
-      const session = login(db, str(body.email), str(body.password));
-      return json({ userId: session.userId }, 200, { "set-cookie": sessionCookie(session.token) });
+      const email = str(body.email);
+      assertLoginAllowed(email, source, now);
+      try {
+        const session = login(db, email, str(body.password));
+        clearLoginFailures(email, source);
+        return json({ userId: session.userId }, 200, { "set-cookie": sessionCookie(session.token) });
+      } catch (error) {
+        if (error instanceof AppError && error.code === "invalid_login") recordLoginFailure(email, source, now);
+        throw error;
+      }
     }
     release = reserveInflight(inflightKey({ token: tokenFromRequest(request), source }));
     if (path === "/api/auth/logout" && method === "POST") {
@@ -132,7 +161,13 @@ export async function handleApi(request: Request, db: Db, options?: { source?: s
     }
     if (path === "/api/me" && method === "GET") {
       const actor = user(db, request);
-      return json({ id: actor.id, email: actor.email, dataClass: actor.data_class });
+      return json(meBody(db, actor));
+    }
+    if (path === "/api/profile/completion" && method === "POST") {
+      const actor = user(db, request);
+      const body = await readJson(request);
+      completeProfile(db, actor.id, { educationLevel: str(body.education_level), ageBand: str(body.age_band) });
+      return json(meBody(db, actor));
     }
     if (path === "/api/providers" && method === "GET") {
       const actor = user(db, request);
@@ -287,18 +322,21 @@ export async function handleApi(request: Request, db: Db, options?: { source?: s
     }
     if (path === "/api/circles" && method === "POST") {
       const actor = user(db, request);
+      assertCircleAllowed(accountCapabilities(profileClaimsFor(db, actor.id)), "participate");
       const body = await readJson(request);
       return json({ id: createCircle(db, actor.id, str(body.name)) }, 201);
     }
     const invite = path.match(/^\/api\/circles\/([^/]+)\/invites$/);
     if (invite && method === "POST") {
       const actor = user(db, request);
+      assertCircleAllowed(accountCapabilities(profileClaimsFor(db, actor.id)), "invite");
       const body = await readJson(request);
       return json(inviteToCircle(db, actor.id, decodeURIComponent(invite[1]), str(body.email)));
     }
     const accept = path.match(/^\/api\/circles\/([^/]+)\/accept$/);
     if (accept && method === "POST") {
       const actor = user(db, request);
+      assertCircleAllowed(accountCapabilities(profileClaimsFor(db, actor.id)), "participate");
       acceptInvite(db, actor.id, decodeURIComponent(accept[1]));
       return json({ ok: true });
     }
@@ -311,10 +349,12 @@ export async function handleApi(request: Request, db: Db, options?: { source?: s
     const posts = path.match(/^\/api\/circles\/([^/]+)\/posts$/);
     if (posts && method === "GET") {
       const actor = user(db, request);
+      assertCircleAllowed(accountCapabilities(profileClaimsFor(db, actor.id)), "participate");
       return json({ posts: readPosts(db, actor.id, decodeURIComponent(posts[1])) });
     }
     if (posts && method === "POST") {
       const actor = user(db, request);
+      assertCircleAllowed(accountCapabilities(profileClaimsFor(db, actor.id)), "participate");
       const body = await readJson(request);
       return json(postToCircle(db, actor.id, decodeURIComponent(posts[1]), str(body.body)), 201);
     }
