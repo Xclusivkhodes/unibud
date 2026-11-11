@@ -2,7 +2,8 @@ import { rmSync } from "node:fs";
 import path from "node:path";
 import { AppError, hashPassword, localDate, newId, newSessionToken, nowIso, recordedMinutes, sha256, shiftDate, studyStreak, verifyPassword } from "./security/crypto.js";
 import { deviceRoot, uploadRoot } from "./server/paths.js";
-import { parseAgeBand, parseEducationLevel, type AgeBand, type EducationLevel, type ProfileClaims } from "./server/account-policy.js";
+import { accountCapabilities, parseAgeBand, parseEducationLevel, type AgeBand, type EducationLevel, type ProfileClaims } from "./server/account-policy.js";
+import { isPublicProfileAllowed, isUnder18, minorInviteBlocked, rejectTrackingFields, sessionSecondsFor } from "./server/minor-safety.js";
 import { all, get, run, transaction, type Db } from "./db.js";
 import { planRoute, type RouteInput } from "./providers/registry.js";
 import { reviewSm2, SCHEDULER_ID } from "./learning/scheduler.js";
@@ -60,6 +61,9 @@ export function completeProfile(db: Db, userId: string, input: { educationLevel:
   must(get(db, "SELECT id FROM users WHERE id = ?", userId));
   const education_level = parseEducationLevel(input.educationLevel);
   const age_band = parseAgeBand(input.ageBand);
+  const current = profileClaimsFor(db, userId);
+  if (current.age_band && current.age_band !== age_band) throw new AppError("age_band_frozen", "Age band is set by the server.", 409);
+  if (current.education_level && current.education_level !== education_level) throw new AppError("education_level_frozen", "Education level cannot be changed here.", 409);
   run(db, "UPDATE profiles SET education_level = ?, age_band = ?, updated_at = ?, rev = rev + 1 WHERE user_id = ?", education_level, age_band, nowIso(), userId);
   return { education_level, age_band };
 }
@@ -71,14 +75,16 @@ export function recordDevMailboxSimulation(db: Db, userId: string, at = nowIso()
 
 const LOGIN_TIMING_HASH = hashPassword("unibud-login-timing");
 
-export function login(db: Db, email: string, password: string, at = nowIso()): { token: string; userId: string } {
+export function login(db: Db, email: string, password: string, at = nowIso()): { token: string; userId: string; maxAgeSeconds: number } {
   const user = get<{ id: string; password_hash: string }>(db, "SELECT id, password_hash FROM users WHERE email = ?", email.trim().toLowerCase());
   const passwordMatches = verifyPassword(password, user?.password_hash ?? LOGIN_TIMING_HASH);
   if (!user || !passwordMatches) throw new AppError("invalid_login", "Login was rejected.", 401);
+  const age = get<{ age_band: AgeBand | null }>(db, "SELECT age_band FROM profiles WHERE user_id = ?", user.id);
+  const maxAgeSeconds = sessionSecondsFor(age?.age_band ?? null);
   const token = newSessionToken();
-  const expires = new Date(new Date(at).getTime() + 14 * 24 * 60 * 60 * 1000).toISOString();
+  const expires = new Date(new Date(at).getTime() + maxAgeSeconds * 1000).toISOString();
   run(db, "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)", sha256(token), user.id, at, expires);
-  return { token, userId: user.id };
+  return { token, userId: user.id, maxAgeSeconds };
 }
 
 export function userFromSession(db: Db, token: string, at = nowIso()): { id: string; email: string; data_class: string } | null {
@@ -96,7 +102,9 @@ export function logout(db: Db, token: string): void {
 }
 
 export function saveProfile(db: Db, userId: string, patch: Record<string, string | number | null>, rev: number) {
-  const allowed = ["legal_name", "display_name", "education_level", "institution", "explanation_depth", "formats_json", "accessibility_json", "language", "offline_consent", "available_hours_per_week", "self_reported_confidence", "goals_text", "exam_syllabus_text", "timezone", "onboarding_status"] as const;
+  if ("age_band" in patch) throw new AppError("age_band_frozen", "Age band is set by the server.", 409);
+  rejectTrackingFields(patch);
+  const allowed = ["legal_name", "display_name", "first_name", "institution", "explanation_depth", "formats_json", "accessibility_json", "language", "offline_consent", "available_hours_per_week", "self_reported_confidence", "goals_text", "exam_syllabus_text", "timezone", "onboarding_status"] as const;
   const keys = Object.keys(patch).filter((key) => (allowed as readonly string[]).includes(key));
   if (keys.length === 0) throw new AppError("empty_patch", "Nothing to update.");
   const assignments = keys.map((key) => `${key} = ?`).join(", ");
@@ -665,14 +673,32 @@ export function confirmAutopilotPreview(db: Db, userId: string, previewId: strin
   return { ...saved, dueSemantics: DUE_SEMANTICS };
 }
 
-export function createCircle(db: Db, ownerId: string, name: string) {
+export function createCircle(db: Db, ownerId: string, name: string, options?: { creatorKind?: "learner" | "parent" | "teacher" }) {
   const id = newId();
   const at = nowIso();
+  const teacher = get<{ verified_teacher: number }>(db, "SELECT verified_teacher FROM users WHERE id = ?", ownerId);
+  const creatorKind = options?.creatorKind ?? (teacher?.verified_teacher === 1 ? "teacher" : "learner");
+  const inviteCode = newId().replace(/-/g, "").slice(0, 12);
   transaction(db, () => {
-    run(db, "INSERT INTO circles (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)", id, ownerId, name, at);
+    run(db, "INSERT INTO circles (id, owner_id, name, invite_code, creator_kind, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, ownerId, name, inviteCode, creatorKind, at);
     run(db, "INSERT INTO circle_members (circle_id, user_id, role, status, created_at) VALUES (?, ?, 'owner', 'active', ?)", id, ownerId, at);
   });
   return id;
+}
+
+export function createParentCircle(db: Db, parentId: string, name: string): { id: string; inviteCode: string } {
+  must(get(db, "SELECT id FROM parent_guardians WHERE id = ?", parentId));
+  const email = `guardian.${parentId}@unibud.invalid`;
+  let owner = get<{ id: string }>(db, "SELECT id FROM users WHERE email = ?", email);
+  if (!owner) owner = registerUser(db, { email, password: `${newSessionToken()}Aa`, dataClass: "test_fixture", educationLevel: "university", ageBand: "18_plus" });
+  const id = createCircle(db, owner.id, name, { creatorKind: "parent" });
+  const row = must(get<{ invite_code: string }>(db, "SELECT invite_code FROM circles WHERE id = ?", id));
+  return { id, inviteCode: row.invite_code };
+}
+
+export function setVerifiedTeacher(db: Db, userId: string): void {
+  const result = run(db, "UPDATE users SET verified_teacher = 1 WHERE id = ?", userId);
+  if (result.changes !== 1) throw new AppError("not_found", "Not found", 404);
 }
 
 export function inviteToCircle(db: Db, ownerId: string, circleId: string, email: string) {
@@ -680,13 +706,69 @@ export function inviteToCircle(db: Db, ownerId: string, circleId: string, email:
   hashPassword("invite-timing");
   const user = get<{ id: string }>(db, "SELECT id FROM users WHERE email = ?", email.trim().toLowerCase());
   if (!user) return { status: "pending" as const };
+  const block = minorInviteBlocked(accountCapabilities(profileClaimsFor(db, ownerId)), accountCapabilities(profileClaimsFor(db, user.id)));
+  if (block) return { status: "pending" as const };
   run(db, "INSERT OR REPLACE INTO circle_members (circle_id, user_id, role, status, revoked_at, created_at) VALUES (?, ?, 'member', 'pending', NULL, ?)", circle.id, user.id, nowIso());
   notify(db, user.id, "circle_invite", "Study circle invite", "Accept the invite on the server before any shared read.", `invite:${circleId}:${user.id}`);
   return { status: "pending" as const };
 }
 
 function activeMember(db: Db, circleId: string, userId: string): boolean {
+  if (get(db, "SELECT 1 FROM circle_blocks WHERE circle_id = ? AND user_id = ?", circleId, userId)) return false;
   return Boolean(get(db, "SELECT 1 FROM circle_members WHERE circle_id = ? AND user_id = ? AND status = 'active'", circleId, userId));
+}
+
+export function joinCircleByCode(db: Db, userId: string, code: string) {
+  const claims = accountCapabilities(profileClaimsFor(db, userId));
+  const verified = get<{ parent_contact_verified: number }>(db, "SELECT parent_contact_verified FROM profiles WHERE user_id = ?", userId);
+  if (claims.age_band === "under_13" && verified?.parent_contact_verified !== 1) throw new AppError("consent_required", "Study Circle waits for parental consent.", 403);
+  const circle = get<{ id: string; creator_kind: string }>(db, "SELECT id, creator_kind FROM circles WHERE invite_code = ?", code.trim());
+  if (!circle) throw new AppError("not_found", "Not found", 404);
+  if (isUnder18(claims) && circle.creator_kind !== "parent" && circle.creator_kind !== "teacher") throw new AppError("circle_cross_level_invite", "This invite is not available for this account.", 403);
+  if (get(db, "SELECT 1 FROM circle_blocks WHERE circle_id = ? AND user_id = ?", circle.id, userId)) throw new AppError("circle_blocked", "Membership was revoked.", 403);
+  run(db, "INSERT OR REPLACE INTO circle_members (circle_id, user_id, role, status, revoked_at, created_at) VALUES (?, ?, 'member', 'active', NULL, ?)", circle.id, userId, nowIso());
+  return { circleId: circle.id, status: "active" as const };
+}
+
+export function reportMember(db: Db, reporterId: string, circleId: string, targetUserId: string): void {
+  if (!activeMember(db, circleId, reporterId) && !get(db, "SELECT 1 FROM circles WHERE id = ? AND owner_id = ?", circleId, reporterId)) {
+    throw new AppError("not_found", "Not found", 404);
+  }
+  const at = nowIso();
+  run(db, "INSERT INTO circle_reports (id, circle_id, reporter_id, target_user_id, created_at) VALUES (?, ?, ?, ?, ?)", newId(), circleId, reporterId, targetUserId, at);
+  run(db, "UPDATE circle_members SET status = 'revoked', revoked_at = ? WHERE circle_id = ? AND user_id = ?", at, circleId, targetUserId);
+  run(db, "INSERT OR REPLACE INTO circle_blocks (circle_id, user_id, blocked_at) VALUES (?, ?, ?)", circleId, targetUserId, at);
+}
+
+export function sendCircleDm(db: Db, fromUserId: string, circleId: string, toUserId: string, body: string): { id: string } {
+  if (!activeMember(db, circleId, fromUserId) || !activeMember(db, circleId, toUserId)) throw new AppError("circle_dm_stranger", "Direct messages require a shared circle.", 403);
+  const id = newId();
+  run(db, "INSERT INTO circle_dms (id, circle_id, from_user_id, to_user_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, circleId, fromUserId, toUserId, body, nowIso());
+  return { id };
+}
+
+export function recordYouTubeWatch(db: Db, userId: string, videoId: string): { stored: boolean } {
+  const age = profileClaimsFor(db, userId).age_band;
+  if (age === "under_13" || age === null) return { stored: false };
+  if (!videoId.trim()) throw new AppError("invalid_video", "Video id was rejected.", 400);
+  run(db, "INSERT INTO watch_history (id, user_id, video_id, watched_at) VALUES (?, ?, ?, ?)", newId(), userId, videoId.trim(), nowIso());
+  return { stored: true };
+}
+
+export function publicProfile(db: Db, userId: string): { id: string; display_name: string } {
+  const claims = accountCapabilities(profileClaimsFor(db, userId));
+  if (!isPublicProfileAllowed(claims)) throw new AppError("not_found", "Not found", 404);
+  const row = get<{ display_name: string }>(db, "SELECT display_name FROM profiles WHERE user_id = ?", userId);
+  return { id: userId, display_name: row?.display_name ?? "" };
+}
+
+export function searchPublicProfiles(db: Db, email: string): Array<{ id: string; display_name: string }> {
+  const user = get<{ id: string }>(db, "SELECT id FROM users WHERE email = ?", email.trim().toLowerCase());
+  if (!user) return [];
+  const claims = accountCapabilities(profileClaimsFor(db, user.id));
+  if (!isPublicProfileAllowed(claims)) return [];
+  const row = get<{ display_name: string }>(db, "SELECT display_name FROM profiles WHERE user_id = ?", user.id);
+  return [{ id: user.id, display_name: row?.display_name ?? "" }];
 }
 
 export function acceptInvite(db: Db, userId: string, circleId: string) {

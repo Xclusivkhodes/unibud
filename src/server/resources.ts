@@ -18,8 +18,11 @@ import {
   reviewCard,
   saveGame,
   saveLab,
+  profileClaimsFor,
   startSession,
 } from "../domain.js";
+import { accountCapabilities } from "./account-policy.js";
+import { assertAiAllowed, assertUploadAllowed } from "./consent.js";
 import { projectile, scoreBuiltInGame } from "../learning/labs.js";
 import { configuredProviderIds, runChatProvider, unconfiguredTurn } from "../providers/chat.js";
 import { AppError, newId, nowIso } from "../security/crypto.js";
@@ -124,11 +127,13 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
     const chatId = decodeURIComponent(messages[1]);
     return once(db, userId, str(body.idempotencyKey), async () => {
     const configured = configuredProviderIds();
+    const claims = accountCapabilities(profileClaimsFor(db, userId));
+    assertAiAllowed(db, userId, claims.age_band);
     const stored = askTutor(db, userId, chatId, str(body.question), {
       task: "tutoring",
       required: ["text"],
       sensitivity: "unknown",
-      audience: "unknown",
+      audience: claims.age_band === "18_plus" && claims.education_level === "university" ? "adults_not_directed_at_minors" : "under18_directed_or_likely",
       billingTier: "unknown",
       grants: [],
       retention: "strict",
@@ -137,8 +142,14 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
       independentCheck: false,
       online: true,
       configuredProviders: configured,
+      ageBand: claims.age_band,
+      educationLevel: claims.education_level,
     });
-    const providerTurn = configured.length === 0 ? unconfiguredTurn() : await runChatProvider({ prompt: str(body.question), signal: request.signal });
+    const providerTurn = configured.length === 0 ? unconfiguredTurn() : await runChatProvider({
+      prompt: str(body.question),
+      signal: request.signal,
+      route: { ageBand: claims.age_band, educationLevel: claims.education_level, audience: claims.age_band === "18_plus" && claims.education_level === "university" ? "adults_not_directed_at_minors" : "under18_directed_or_likely" },
+    });
     return json({ ...stored, providerTurn });
     });
   }
@@ -160,6 +171,8 @@ export async function handleOwnedResources(request: Request, db: Db, pathname: s
   }
   if (pathname === "/api/uploads" && method === "POST") {
     const body = await readJson(request);
+    const claims = accountCapabilities(profileClaimsFor(db, userId));
+    assertUploadAllowed(db, userId, claims.age_band);
     return once(db, userId, str(body.idempotencyKey), () => {
     const bytes = Buffer.from(str(body.dataBase64), "base64");
     const decision = inspectUpload(bytes, str(body.declaredMime) || "text/plain");

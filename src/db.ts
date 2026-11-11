@@ -21,6 +21,12 @@ function migrateProfiles(db: DatabaseSync): void {
   if (!names.has("age_band")) db.exec("ALTER TABLE profiles ADD COLUMN age_band TEXT");
   if (!names.has("parent_contact_verified")) db.exec("ALTER TABLE profiles ADD COLUMN parent_contact_verified INTEGER NOT NULL DEFAULT 0");
   if (!names.has("dev_mailbox_simulated_at")) db.exec("ALTER TABLE profiles ADD COLUMN dev_mailbox_simulated_at TEXT");
+  if (!names.has("first_name")) db.exec("ALTER TABLE profiles ADD COLUMN first_name TEXT NOT NULL DEFAULT ''");
+  const userColumns = new Set((db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((column) => column.name));
+  if (!userColumns.has("verified_teacher")) db.exec("ALTER TABLE users ADD COLUMN verified_teacher INTEGER NOT NULL DEFAULT 0");
+  const circleColumns = new Set((db.prepare("PRAGMA table_info(circles)").all() as Array<{ name: string }>).map((column) => column.name));
+  if (!circleColumns.has("invite_code")) db.exec("ALTER TABLE circles ADD COLUMN invite_code TEXT");
+  if (!circleColumns.has("creator_kind")) db.exec("ALTER TABLE circles ADD COLUMN creator_kind TEXT NOT NULL DEFAULT 'learner'");
 }
 
 function bind(params: unknown[]): SQLInputValue[] {

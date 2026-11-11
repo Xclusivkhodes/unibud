@@ -5,14 +5,14 @@ import { userFromSession } from "../domain.js";
 import { getAppDb } from "./appdb.js";
 import { cookieIsSecure, SESSION_COOKIE } from "./http.js";
 
-export async function setSession(token: string) {
+export async function setSession(token: string, maxAgeSeconds = 14 * 24 * 60 * 60) {
   const jar = await cookies();
   jar.set(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
     secure: cookieIsSecure(),
-    maxAge: 14 * 24 * 60 * 60,
+    maxAge: maxAgeSeconds,
   });
 }
 

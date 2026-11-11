@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   data_class TEXT NOT NULL CHECK (data_class IN ('learner', 'test_fixture')),
+  verified_teacher INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   legal_name TEXT NOT NULL DEFAULT '',
   display_name TEXT NOT NULL DEFAULT '',
+  first_name TEXT NOT NULL DEFAULT '',
   education_level TEXT,
   institution TEXT NOT NULL DEFAULT '',
   explanation_depth TEXT NOT NULL DEFAULT 'intermediate',
@@ -240,6 +242,8 @@ CREATE TABLE IF NOT EXISTS circles (
   id TEXT PRIMARY KEY,
   owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  invite_code TEXT,
+  creator_kind TEXT NOT NULL DEFAULT 'learner',
   created_at TEXT NOT NULL
 );
 
@@ -471,4 +475,76 @@ CREATE TABLE IF NOT EXISTS schedule_previews (
   payload_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   consumed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS parent_guardians (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS parent_sessions (
+  token_hash TEXT PRIMARY KEY,
+  parent_id TEXT NOT NULL REFERENCES parent_guardians(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS parent_links (
+  parent_id TEXT NOT NULL REFERENCES parent_guardians(id) ON DELETE CASCADE,
+  child_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (parent_id, child_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS consent_tokens (
+  id TEXT PRIMARY KEY,
+  child_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  parent_email TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS consent_log (
+  id TEXT PRIMARY KEY,
+  child_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  at TEXT NOT NULL,
+  method TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  event TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS circle_reports (
+  id TEXT PRIMARY KEY,
+  circle_id TEXT NOT NULL REFERENCES circles(id) ON DELETE CASCADE,
+  reporter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  target_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS circle_blocks (
+  circle_id TEXT NOT NULL REFERENCES circles(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_at TEXT NOT NULL,
+  PRIMARY KEY (circle_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS circle_dms (
+  id TEXT PRIMARY KEY,
+  circle_id TEXT NOT NULL REFERENCES circles(id) ON DELETE CASCADE,
+  from_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS watch_history (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  video_id TEXT NOT NULL,
+  watched_at TEXT NOT NULL
 );

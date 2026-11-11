@@ -83,7 +83,7 @@ export async function registerAction(formData: FormData) {
     const user = registerUser(getAppDb(), { email, password, educationLevel, ageBand });
     if (displayName) saveProfile(getAppDb(), user.id, { display_name: displayName, onboarding_status: "completed" }, 1);
     const session = login(getAppDb(), email, password);
-    await setSession(session.token);
+    await setSession(session.token, session.maxAgeSeconds);
   } catch (error) {
     fail("/register", error);
   }
@@ -93,7 +93,7 @@ export async function registerAction(formData: FormData) {
 export async function loginAction(formData: FormData) {
   try {
     const session = login(getAppDb(), String(formData.get("email") ?? ""), String(formData.get("password") ?? ""));
-    await setSession(session.token);
+    await setSession(session.token, session.maxAgeSeconds);
   } catch (error) {
     fail("/login", error);
   }

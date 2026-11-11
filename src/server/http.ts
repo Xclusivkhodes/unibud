@@ -18,9 +18,9 @@ export function cookieIsSecure(): boolean {
   return process.env.UNIBUD_COOKIE_INSECURE !== "1";
 }
 
-export function sessionCookie(token: string): string {
+export function sessionCookie(token: string, maxAgeSeconds = 14 * 24 * 60 * 60): string {
   const secure = cookieIsSecure() ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${14 * 24 * 60 * 60}${secure}`;
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;
 }
 
 export function clearedSessionCookie(): string {
@@ -56,7 +56,7 @@ export function postRegister(db: Db, body: { email?: string; password?: string }
   try {
     const user = registerUser(db, { email: body.email ?? "", password: body.password ?? "" });
     const session = login(db, user.email, body.password ?? "");
-    return privateJson({ userId: user.id }, 201, { "set-cookie": sessionCookie(session.token) });
+    return privateJson({ userId: user.id }, 201, { "set-cookie": sessionCookie(session.token, session.maxAgeSeconds) });
   } catch (error) {
     const code = error instanceof AppError ? error.code : "internal";
     const status = error instanceof AppError ? error.status : 500;

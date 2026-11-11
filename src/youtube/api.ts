@@ -101,13 +101,13 @@ export type SearchResult =
   | { status: "not_executed"; reason: "live_youtube_call_not_authorized" }
   | { status: "ok"; cards: VideoCard[]; quota: ReturnType<typeof quotaForSearchAndHydrate>; fixture: boolean };
 
-export function buildSearchListUrl(query: string, apiKey: string): URL {
+export function buildSearchListUrl(query: string, apiKey: string, safeSearch: "strict" | "moderate" = "moderate"): URL {
   const url = new URL("https://www.googleapis.com/youtube/v3/search");
   url.searchParams.set("part", "snippet");
   url.searchParams.set("type", "video");
   url.searchParams.set("q", query);
   url.searchParams.set("videoEmbeddable", "true");
-  url.searchParams.set("safeSearch", "moderate");
+  url.searchParams.set("safeSearch", safeSearch);
   url.searchParams.set("maxResults", "10");
   url.searchParams.set("key", apiKey);
   return url;
@@ -161,9 +161,9 @@ function scrubCard(card: VideoCard, secret: string): VideoCard {
   };
 }
 
-export async function runMockedSearch(options: { apiKey: string; query: string; fetchImpl: MockFetch }): Promise<SearchResult & { requested: string[] }> {
+export async function runMockedSearch(options: { apiKey: string; query: string; fetchImpl: MockFetch; safeSearch?: "strict" | "moderate" }): Promise<SearchResult & { requested: string[] }> {
   const outbound: string[] = [];
-  const searchUrl = buildSearchListUrl(options.query, options.apiKey);
+  const searchUrl = buildSearchListUrl(options.query, options.apiKey, options.safeSearch ?? "moderate");
   outbound.push(searchUrl.toString());
   const searchResponse = await options.fetchImpl(searchUrl.toString(), { redirect: "error" });
   const search = (await searchResponse.json()) as { items?: Record<string, unknown>[] };
@@ -199,12 +199,13 @@ export async function searchFromServerEnv(options: {
   query: string;
   online?: boolean;
   transport?: MockFetch;
+  safeSearch?: "strict" | "moderate";
 }): Promise<SearchResult & { requested?: string[] }> {
   if (options.online === false) return { status: "offline" };
   const apiKey = youtubeApiKey();
   if (!apiKey) return { status: "unconfigured" };
   if (!options.transport) return { status: "not_executed", reason: "live_youtube_call_not_authorized" };
-  return runMockedSearch({ apiKey, query: options.query, fetchImpl: options.transport });
+  return runMockedSearch({ apiKey, query: options.query, fetchImpl: options.transport, safeSearch: options.safeSearch });
 }
 
 export async function searchVideos(options: {

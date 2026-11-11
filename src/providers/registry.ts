@@ -167,6 +167,8 @@ export type RouteInput = {
   configuredProviders: ProviderId[];
   /** Test-only. Production routes leave this unset, so OpenAI, Anthropic, and xAI stay ineligible. */
   allowPaidProviders?: boolean;
+  ageBand?: "under_13" | "13_17" | "18_plus" | null;
+  educationLevel?: "university" | "senior_high" | "junior_high" | null;
 };
 
 export type RouteDecision = {
@@ -195,6 +197,9 @@ export function trainingBlock(entry: RegistryEntry): string | null {
 }
 
 export function entryBlock(entry: RegistryEntry, input: RouteInput): string | null {
+  const schoolLimited = input.educationLevel === "junior_high" || input.educationLevel === "senior_high";
+  const ageLimited = input.ageBand !== undefined && input.ageBand !== "18_plus";
+  if (schoolLimited || ageLimited) return "age_band_provider_not_cleared";
   if (entry.provider === "google") {
     const reasons = googlePolicyFailures(input);
     const training = trainingBlock(entry);
