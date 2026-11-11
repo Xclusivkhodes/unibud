@@ -1,3 +1,4 @@
+import nodePath from "node:path";
 import { all, get, type Db } from "../db.js";
 import type { ProviderPublicStatus, YoutubePublicStatus } from "../contract/types.js";
 import {
@@ -10,6 +11,7 @@ import {
   issueAutopilotPreview,
   issueCramPreview,
   createCircle,
+  createParentCircle,
   createCourse,
   createTask,
   createTopic,
@@ -24,9 +26,15 @@ import {
   readPosts,
   completeProfile,
   profileClaimsFor,
+  joinCircleByCode,
+  publicProfile,
+  recordYouTubeWatch,
   registerUser,
-  recordDevMailboxSimulation,
+  reportMember,
   revokeMember,
+  searchPublicProfiles,
+  sendCircleDm,
+  setVerifiedTeacher,
   saveProfile,
   startAttempt,
   submitAttempt,
@@ -40,6 +48,9 @@ import { captionDownloadStatus } from "../youtube/api.js";
 import { readLimitedJson } from "./body.js";
 import { clearedSessionCookie, sessionCookie, tokenFromRequest } from "./http.js";
 import { accountCapabilities, assertCircleAllowed } from "./account-policy.js";
+import { ageBandFromDateOfBirth, rejectTrackingFields, safeSearchFor } from "./minor-safety.js";
+import { completeConsent, exportChild, loginParent, parentFromSession, purgePendingConsent, requestConsent, revokeChild, viewChild } from "./consent.js";
+import { auditYouTubeUrl, buildSearchListUrl } from "../youtube/api.js";
 import { assertBodyBudget, assertLoginAllowed, clearLoginFailures, inflightKey, recordLoginFailure, reserveInflight, trustedRequestSource } from "./limits.js";
 import { handleOwnedResources } from "./resources.js";
 
@@ -135,19 +146,28 @@ export async function handleApi(request: Request, db: Db, options?: { source?: s
       const body = await readJson(request);
       release = reserveInflight(inflightKey({ email: str(body.email), source }));
       if (path === "/api/auth/register") {
+        rejectTrackingFields(body);
+        if (str(body.parent_email)) throw new AppError("parent_email_not_on_register", "Parent email is not part of registration.", 400);
         if (!str(body.education_level)) throw new AppError("invalid_education_level", "Education level was rejected.", 400);
-        if (!str(body.age_band)) throw new AppError("invalid_age_band", "Age band was rejected.", 400);
-        const created = registerUser(db, { email: str(body.email), password: str(body.password), educationLevel: str(body.education_level), ageBand: str(body.age_band) });
+        let ageBand = str(body.age_band);
+        const dateOfBirth = str(body.date_of_birth);
+        if (dateOfBirth) {
+          const derived = ageBandFromDateOfBirth(dateOfBirth, new Date(now));
+          if (ageBand && ageBand !== derived) throw new AppError("age_band_conflict", "Age band does not match the date of birth.", 400);
+          ageBand = derived;
+        }
+        if (!ageBand) throw new AppError("invalid_age_band", "Age band was rejected.", 400);
+        const created = registerUser(db, { email: str(body.email), password: str(body.password), educationLevel: str(body.education_level), ageBand });
         if (str(body.displayName)) saveProfile(db, created.id, { display_name: str(body.displayName), onboarding_status: "completed" }, 1);
         const session = login(db, created.email, str(body.password));
-        return json({ userId: created.id, education_level: created.education_level, age_band: created.age_band }, 201, { "set-cookie": sessionCookie(session.token) });
+        return json({ userId: created.id, education_level: created.education_level, age_band: created.age_band }, 201, { "set-cookie": sessionCookie(session.token, session.maxAgeSeconds) });
       }
       const email = str(body.email);
       assertLoginAllowed(email, source, now);
       try {
         const session = login(db, email, str(body.password));
         clearLoginFailures(email, source);
-        return json({ userId: session.userId }, 200, { "set-cookie": sessionCookie(session.token) });
+        return json({ userId: session.userId }, 200, { "set-cookie": sessionCookie(session.token, session.maxAgeSeconds) });
       } catch (error) {
         if (error instanceof AppError && error.code === "invalid_login") recordLoginFailure(email, source, now);
         throw error;
@@ -162,6 +182,17 @@ export async function handleApi(request: Request, db: Db, options?: { source?: s
     if (path === "/api/me" && method === "GET") {
       const actor = user(db, request);
       return json(meBody(db, actor));
+    }
+    if (path === "/api/profile" && method === "PATCH") {
+      const actor = user(db, request);
+      const body = await readJson(request);
+      rejectTrackingFields(body);
+      if ("age_band" in body) throw new AppError("age_band_frozen", "Age band is set by the server.", 409);
+      const patch: Record<string, string> = {};
+      if (typeof body.display_name === "string") patch.display_name = body.display_name;
+      if (typeof body.first_name === "string") patch.first_name = body.first_name;
+      if (Object.keys(patch).length === 0) throw new AppError("empty_patch", "Nothing to update.", 400);
+      return json(saveProfile(db, actor.id, patch, Number(body.rev ?? 1)));
     }
     if (path === "/api/profile/completion" && method === "POST") {
       const actor = user(db, request);
@@ -366,6 +397,102 @@ export async function handleApi(request: Request, db: Db, options?: { source?: s
       const actor = user(db, request);
       deleteAccount(db, actor.id);
       return json({ deleted: true }, 200, { "set-cookie": clearedSessionCookie() });
+    }
+    if (path === "/api/consent/request" && method === "POST") {
+      const actor = user(db, request);
+      const body = await readJson(request);
+      const logs: string[] = [];
+      const result = requestConsent(db, actor.id, {
+        parentEmail: str(body.parent_email),
+        firstName: str(body.first_name),
+        policyVersion: str(body.policy_version),
+        now: new Date(now),
+        outboxDir: process.env.UNIBUD_OUTBOX_DIR?.trim() || nodePath.join(".data", "outbox"),
+        log: (line) => logs.push(line),
+      });
+      return json({ ...result, log: logs });
+    }
+    if (path === "/api/consent/complete" && method === "POST") {
+      const body = await readJson(request);
+      const completed = completeConsent(db, { token: str(body.token), parentPassword: str(body.parent_password), method: str(body.method) || "checkbox", now: new Date(now) });
+      return json({ childUserId: completed.childUserId, status: "recorded" });
+    }
+    if (path === "/api/parent/login" && method === "POST") {
+      const body = await readJson(request);
+      const session = loginParent(db, str(body.email), str(body.password), new Date(now).toISOString());
+      return json({ parentId: session.parentId }, 200, { "set-cookie": `unibud_parent=${encodeURIComponent(session.token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=7200` });
+    }
+    const parentToken = (request.headers.get("cookie") ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith("unibud_parent="))?.slice("unibud_parent=".length);
+    const parent = parentToken ? parentFromSession(db, decodeURIComponent(parentToken), new Date(now).toISOString()) : null;
+    const childRoute = path.match(/^\/api\/parent\/children\/([^/]+)(\/export|\/revoke)?$/);
+    if (childRoute) {
+      if (!parent) throw new AppError("unauthenticated", "Sign in required.", 401);
+      const childId = decodeURIComponent(childRoute[1]);
+      if (childRoute[2] === "/export" && method === "GET") return json(exportChild(db, parent.id, childId));
+      if (childRoute[2] === "/revoke" && method === "POST") return json(revokeChild(db, parent.id, childId));
+      if (!childRoute[2] && method === "GET") return json(viewChild(db, parent.id, childId));
+      if (!childRoute[2] && method === "DELETE") return json(revokeChild(db, parent.id, childId));
+    }
+    if (path === "/api/parent/circles" && method === "POST") {
+      if (!parent) throw new AppError("unauthenticated", "Sign in required.", 401);
+      const body = await readJson(request);
+      return json(createParentCircle(db, parent.id, str(body.name)), 201);
+    }
+    if (path === "/api/consent/purge" && method === "POST") {
+      const expected = process.env.UNIBUD_ADMIN_TOKEN?.trim();
+      if (!expected) throw new AppError("admin_unconfigured", "Admin token is not configured.", 503);
+      if (request.headers.get("x-unibud-admin") !== expected) throw new AppError("forbidden", "Admin token was rejected.", 403);
+      return json(purgePendingConsent(db, new Date(now)));
+    }
+    if (path === "/api/admin/teachers" && method === "POST") {
+      const expected = process.env.UNIBUD_ADMIN_TOKEN?.trim();
+      if (!expected) throw new AppError("admin_unconfigured", "Admin token is not configured.", 503);
+      if (request.headers.get("x-unibud-admin") !== expected) throw new AppError("forbidden", "Admin token was rejected.", 403);
+      const body = await readJson(request);
+      setVerifiedTeacher(db, str(body.userId));
+      return json({ ok: true });
+    }
+    if (path === "/api/youtube/search" && method === "POST") {
+      const actor = user(db, request);
+      const body = await readJson(request);
+      const claims = accountCapabilities(profileClaimsFor(db, actor.id));
+      const safeSearch = safeSearchFor(claims);
+      const key = process.env.YOUTUBE_API_KEY?.trim();
+      const url = buildSearchListUrl(str(body.q) || "study", key || "not-configured", safeSearch);
+      return json({ status: key ? "not_executed" : "unconfigured", safeSearch, requested: [auditYouTubeUrl(url.toString())] });
+    }
+    if (path === "/api/youtube/history" && method === "POST") {
+      const actor = user(db, request);
+      const body = await readJson(request);
+      return json(recordYouTubeWatch(db, actor.id, str(body.videoId)));
+    }
+    if (path === "/api/profiles/search" && method === "POST") {
+      user(db, request);
+      const body = await readJson(request);
+      return json({ results: searchPublicProfiles(db, str(body.email)) });
+    }
+    const profilePublic = path.match(/^\/api\/profiles\/([^/]+)$/);
+    if (profilePublic && method === "GET") {
+      user(db, request);
+      return json(publicProfile(db, decodeURIComponent(profilePublic[1])));
+    }
+    if (path === "/api/circles/join" && method === "POST") {
+      const actor = user(db, request);
+      const body = await readJson(request);
+      return json(joinCircleByCode(db, actor.id, str(body.code)));
+    }
+    const report = path.match(/^\/api\/circles\/([^/]+)\/reports$/);
+    if (report && method === "POST") {
+      const actor = user(db, request);
+      const body = await readJson(request);
+      reportMember(db, actor.id, decodeURIComponent(report[1]), str(body.userId));
+      return json({ revoked: true });
+    }
+    const dm = path.match(/^\/api\/circles\/([^/]+)\/dm$/);
+    if (dm && method === "POST") {
+      const actor = user(db, request);
+      const body = await readJson(request);
+      return json(sendCircleDm(db, actor.id, decodeURIComponent(dm[1]), str(body.userId), str(body.body)), 201);
     }
     const owned = await handleOwnedResources(request, db, path, method);
     if (owned) return owned;

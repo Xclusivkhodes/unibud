@@ -322,8 +322,8 @@ test("connected learning records stay owned and fixture metrics stay separate", 
 
 test("circle revocation and sync acknowledgement are server backed", () => {
   const database = db();
-  const owner = registerUser(database, { email: "owner@example.edu", password: "password123" });
-  const member = registerUser(database, { email: "member@example.edu", password: "password123" });
+  const owner = registerUser(database, { email: "owner@example.edu", password: "password123", educationLevel: "university", ageBand: "18_plus" });
+  const member = registerUser(database, { email: "member@example.edu", password: "password123", educationLevel: "university", ageBand: "18_plus" });
   const outsider = registerUser(database, { email: "out@example.edu", password: "password123" });
   const circle = createCircle(database, owner.id, "Group");
   expect(inviteToCircle(database, owner.id, circle, "missing@example.edu")).toEqual({ status: "pending" });
